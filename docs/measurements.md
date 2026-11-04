@@ -113,4 +113,4 @@ The team's stand-down: a real session of 993 s, 27,823 frames, one team back 2 t
 
 ## The viewer
 
-"Seems like it's working! Least for the test pattern." The chain since: to be judged by the same eye.
+"Seems like it's working! Least for the test pattern." Then, on the whole chain as it stands in this commit, on real use of the monitor: "Seems everything looks really good atm". That session: 230 s: identical 0.28/s, generated 29.58/s, glass 59.15/s, 8 discards, 0 skipped, 0 late; card mean 23.37, max 35.91 ms.
