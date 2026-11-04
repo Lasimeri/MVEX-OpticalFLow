@@ -25,7 +25,7 @@ dB on tiles that moved, and sharpness on them against the truth (differences in 
 
 Tried and thrown out on these numbers: vectors projected forward to the middle instant (at best +0 dB, -.009 to -.065 against none, on window, scroll, fast and real footage); credit in the pick for the texture a vector lines up (worse in every scene at every strength, sharpness up to 2.383: it invents edges).
 
-On the monitor, pixel for pixel, real use: glass 59 to 60 pictures/s when the content moves at the full rate, half generated; card 10.2 to 11.5 ms; cast stamp to scanout 40.7 to 58.6 ms, mostly 57.5, against 37.9 to 47.8 at the half-size field: which refresh a picture catches depends on where the cast falls against the refresh, and at 12 ms a frame it now often misses one. In 64 s of use: cast 29.89/s, glass 59.61/s, 2 discards, card mean 11.36 ms, max 26.19 (the team coming back).
+On the monitor, pixel for pixel, real use: glass 59 to 60 pictures/s when the content moves at the full rate, half generated; card 10.2 to 11.5 ms; cast stamp to scanout 40.7 to 58.6 ms in two groups, 36 s at 40 to 45 ms and 47 s at 55 to 60 ms of 88 s, against 37.9 to 47.8 at the half-size field: which refresh a picture catches depends on where the cast falls against the refresh, and at 12 ms a frame it now often misses one. In 64 s of use: cast 29.89/s, glass 59.61/s, 2 discards, card mean 11.36 ms, max 26.19 (the team coming back).
 
 ## The team's stand-down
 
