@@ -1,0 +1,15 @@
+tools/pollmove/ktree/
+out/
+input/
+logs/
+local.conf
+*.o
+*.ko
+*.mod
+*.mod.c
+*.d
+*.cmd
+modules.order
+Module.symvers
+.cache/
+compile_commands.json
