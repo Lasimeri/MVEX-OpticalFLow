@@ -31,6 +31,8 @@ static inline vxu vxu_and_s(vxu a, const uint32_t *s) { return __builtin_ia32_kn
 static inline vxu vxu_add_s(vxu a, const uint32_t *s) { return __builtin_ia32_knc_vpaddd_zzm(VX_UI, VX_ALL, a, s, VX_SSS_1TO16); }
 #define vxu_srl(v, n) (__builtin_ia32_knc_vpsrld_zzi(VX_UI, VX_ALL, (v), (n), 0))
 #define vxu_sll(v, n) (__builtin_ia32_knc_vpslld_zzi(VX_UI, VX_ALL, (v), (n), 0))
+/* Lanes of k from b, the rest from a. */
+static inline vxu vxu_blend(vxk k, vxu a, vxu b) { return (__v16si)__builtin_ia32_knc_vblendmps_zzz(k, (__v16sf)a, (__v16sf)b, 0); }
 /* Whole numbers to F32 lanes, exact below 2^24. */
 static inline vxf vxu_to_f(vxu v) { return (vxf)__builtin_ia32_knc_vcvtfxpntdq2ps_zzi(VX_U, VX_ALL, v, 0, 0); }
 /* Whole-valued F32 lanes to numbers. */
@@ -57,6 +59,7 @@ static inline vxu vxu_srl_model(vxu a, int n) { VX_LANE_LOOP a.l[i] >>= n; retur
 static inline vxu vxu_sll_model(vxu a, int n) { VX_LANE_LOOP a.l[i] <<= n; return a; }
 #define vxu_srl(v, n) vxu_srl_model((v), (n))
 #define vxu_sll(v, n) vxu_sll_model((v), (n))
+static inline vxu vxu_blend(vxk k, vxu a, vxu b) { VX_LANE_LOOP if ((k >> i) & 1) a.l[i] = b.l[i]; return a; }
 static inline vxf vxu_to_f(vxu v) { vxf r; VX_LANE_LOOP r.l[i] = (float)(int32_t)v.l[i]; return r; }
 static inline vxu vxu_from_f(vxf v) { vxu r; VX_LANE_LOOP r.l[i] = (uint32_t)(int32_t)lrintf(v.l[i]); return r; }
 

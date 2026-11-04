@@ -116,6 +116,14 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         fprintf(stderr, "mvexflowd: session memory or team\n");
         return -1;
     }
+    if (cfg.pick_r)
+        f.pick_r = (int)cfg.pick_r - 1;
+    if (cfg.pick_h)
+        f.pick_h = (int)cfg.pick_h - 1;
+    if (cfg.pick_bias)
+        f.pick_bias = (float)(cfg.pick_bias - 1);
+    if (cfg.enough)
+        f.fg.enough = (float)(cfg.enough - 1);
     const uint64_t khz = measure_khz();
     ctl->card_threads = (uint32_t)n;
     ctl->card_cores = (uint32_t)cores;

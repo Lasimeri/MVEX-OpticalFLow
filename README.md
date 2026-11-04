@@ -4,7 +4,18 @@ One monitor at half its refresh, doubled in real time by a Xeon Phi 7120A: AMD's
 
 KWin casts the monitor at half the refresh. The card makes the frame half way between each two. A click-through overlay on the same monitor shows generated, real, generated, real. On a 1366x768 monitor at 59.79 Hz that is 29.895 frames a second in and 59.79 pictures a second out. It doubles whatever is on the monitor: a video, a window being dragged, a scrolling page. The pointer stays the compositor's own, on top, at the full refresh. The monitor's mode and scale are not touched.
 
-The port comes from [Intel-Phi-VisionTrack](https://github.com/Lasimeri/Intel-Phi-VisionTrack) (`src/kern/framegen.c`, which is here byte for byte). [docs/INDEX.md](docs/INDEX.md) says what is AMD's and what is not. New here: colour, since the port was grey; the host program; the card program.
+The port comes from [Intel-Phi-VisionTrack](https://github.com/Lasimeri/Intel-Phi-VisionTrack) (`src/kern/framegen.c`, unchanged but for one threshold made a setting). [docs/INDEX.md](docs/INDEX.md) says what is AMD's and what is not. New here: colour, since the port was grey; the host program; the card program; and the picture, pixel for pixel.
+
+## Pixel for pixel
+
+The port built its motion field at half the picture's size, to fit a tracker's budget. A motion of an odd number of pixels could not be represented there, so the two frames met a pixel apart before they were averaged: a double edge. Here the field is at the picture's own size, 171 x 96 blocks of 8 x 8, and every pixel picks its own vector among those around it, the one on which the two frames agree over a 5 x 5 window. Samples are whole pixels of both frames, `a` at `x + (v >> 1)` and `b` at `x - (v - (v >> 1))`, the same place of the scene, so their mean is as sharp as they are and nothing is resampled.
+
+| Against a real frame left out, moving tiles | Field at half size | Pixel for pixel | Mean of the two frames |
+|---|---|---|---|
+| Sharpness, 1.000 = the truth's | 0.911 | **0.978** | 0.867 |
+| dB | **33.860** | 29.152 | 28.556 |
+
+The dB fall is the trade, not a fault: at an odd motion a sharp picture sits half a pixel off the true middle, and only resampling reaches that place, which is the blur this exists to remove. `mvexflow --half` still runs the port's way. Which looks better is the viewer's to say.
 
 ```
 ╔═ desktop ═══════════════════════════════════════════════════════════════════════════════════╗
@@ -23,7 +34,7 @@ The port comes from [Intel-Phi-VisionTrack](https://github.com/Lasimeri/Intel-Ph
 ╚═ PCIe, the card's own DMA ════════════════════════════════════════╪══════════════════╪══════╝
 ╔═ Xeon Phi 7120A ══════════════════════════════════════════════════╪══════════════════╪══════╗
 ║  ┌────────────────────────────────────────────────────────────────▼──────────────────┴────┐ ║
-║  │ mvexflowd: frame in, luma, pyramid, search, filter, upscale, mid, picture, frame out   │ ║
+║  │ mvexflowd: frame in, luma, pyramid, search, filter, upscale, mid, pick, frame out      │ ║
 ║  │ 120 threads: t0, t1 of cores 0 to 59. Block pollers moved to cpus 241, 242, core 60.   │ ║
 ║  └────────────────────────────────────────────────────────────────────────────────────────┘ ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════╝

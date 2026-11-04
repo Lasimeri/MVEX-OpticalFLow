@@ -10,6 +10,7 @@
 
 static const uint32_t M_00FF00FF VX_ALIGNED = 0x00ff00ffu, M_FF00FF00 VX_ALIGNED = 0xff00ff00u, M_7F VX_ALIGNED = 0x7f7f7f7fu, M_FF VX_ALIGNED = 0x000000ffu;
 static const uint32_t ROUND_8 VX_ALIGNED = 0x00800080u, ROUND_2 VX_ALIGNED = 2u, ALPHA VX_ALIGNED = 0xff000000u;
+static const uint32_t ABS_F VX_ALIGNED = 0x7fffffffu;
 /* B + (R << 16), times this, holds 29 B + 77 R in its high half: one multiply for two channels. 77 B stays under 2^16 so nothing carries in; 29 R falls off the top. */
 static const uint32_t K_BR VX_ALIGNED = (29u << 16) | 77u, K_G VX_ALIGNED = 150u, K_B VX_ALIGNED = 29u, K_R VX_ALIGNED = 77u;
 
@@ -201,6 +202,121 @@ void bgra_merge_vx(const struct bgra *out, const struct vt_plane src[3], int y0,
             const vxu g = vxu_from_f(vx_round(vx_mul_s(vx_load(sg + x), &ONE_64), VX_RND_NEAREST));
             const vxu r = vxu_from_f(vx_round(vx_mul_s(vx_load(sr + x), &ONE_64), VX_RND_NEAREST));
             vxu_store_nr(d + x, vxu_or(vxu_or(b, vxu_sll(g, 8)), vxu_or(vxu_sll(r, 16), alpha)));
+        }
+    }
+    img_fence();
+}
+
+/* ---- the picture at full resolution, a vector per pixel ---- */
+
+#define PICK_MAX 8     /* vectors a tile weighs */
+#define PICK_RADIUS 3  /* rows of the window each side, at most */
+
+static inline const float *luma_at(const struct vt_plane *p, int x, int y)
+{
+    const int last = ((p->w + 15) & ~15) + VT_PAD_X - 16;
+    return plane_row(p, clampi(y, -VT_PAD_Y, p->h + VT_PAD_Y - 1)) + clampi(x, -VT_PAD_X, last);
+}
+
+/* A tile's own four blocks first, then the ring around them: when more vectors are about than a tile weighs, the nearest stay. */
+static const signed char PICK_ORDER[16][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}, {-1, 0}, {-1, 1}, {2, 0}, {2, 1}, {0, -1}, {1, -1}, {0, 2}, {1, 2}, {-1, -1}, {2, -1}, {-1, 2}, {2, 2}};
+
+void bgra_pick_vx(const struct fg_field *mid, const struct fg_field *parent, const struct vt_plane *ya, const struct vt_plane *yb, const struct bgra *a, const struct bgra *b, const struct bgra *out, int r, int h, float bias, int t0, int t1)
+{
+    /* Per vector, per row of the tile and of the window beyond it: the disagreement over the row's own columns. Integer-valued F32: 16,320 x 7 x 5 is far below 2^24, so the running sums below are exact, and the card and the lane model agree. */
+    float cols[PICK_MAX][16 + 2 * PICK_RADIUS][16] VX_ALIGNED;
+    const float bias_q VX_ALIGNED = bias;
+    const vxf vbias = vx_bcast(&bias_q);
+    const int tw = (out->w + 15) / 16;
+    for (int t = t0; t < t1; t++) {
+        const int tx = t % tw, ty = t / tw, x = tx * 16, y0 = ty * 16;
+        const int y1 = y0 + 16 < out->h ? y0 + 16 : out->h;
+        uint32_t cand[PICK_MAX];
+        /* First, and so the winner of a tie: the tile's own block of the level above, whose larger block sees more: on a flat panel with a mark on it, it knows the panel moves. */
+        const struct fg_vec *pv = &parent->v[clampi(ty, 0, parent->h - 1) * parent->w + clampi(tx, 0, parent->w - 1)];
+        const struct fg_vec ps = {(int16_t)(pv->x * 2), (int16_t)(pv->y * 2)};
+        memcpy(&cand[0], &ps, sizeof cand[0]);
+        int n = 1;
+        for (int o = 0; o < 16; o++) {
+            uint32_t w;
+            memcpy(&w, &mid->v[clampi(2 * ty + PICK_ORDER[o][1], 0, mid->h - 1) * mid->w + clampi(2 * tx + PICK_ORDER[o][0], 0, mid->w - 1)], sizeof w);
+            int seen = 0;
+            for (int i = 0; i < n; i++)
+                seen |= cand[i] == w;
+            if (!seen && n < PICK_MAX)
+                cand[n++] = w;
+        }
+        /* Decoded once: a at x + ax, y + ay; b at x - bx, y - by. */
+        int ax[PICK_MAX], ay[PICK_MAX], bx[PICK_MAX], by[PICK_MAX];
+        if (n == 1) {
+            /* Most of a picture. */
+            struct fg_vec v;
+            memcpy(&v, &cand[0], sizeof v);
+            const int sax = v.x >> 1, say = v.y >> 1, sbx = v.x - sax, sby = v.y - say;
+            for (int y = y0; y < y1; y++)
+                vxu_store_nr(bgra_row(out, y) + x, mean_bytes(vxu_loadu(row_at(a, x + sax, y + say)), vxu_loadu(row_at(b, x - sbx, y - sby))));
+            continue;
+        }
+        /* No motion is always weighed. */
+        {
+            int z = -1;
+            for (int i = 0; i < n; i++)
+                if (!cand[i])
+                    z = i;
+            if (z < 0) {
+                z = n < PICK_MAX ? n++ : PICK_MAX - 1;
+                cand[z] = 0;
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            struct fg_vec v;
+            memcpy(&v, &cand[i], sizeof v);
+            ax[i] = v.x >> 1;
+            ay[i] = v.y >> 1;
+            bx[i] = v.x - ax[i];
+            by[i] = v.y - ay[i];
+        }
+        const int rows = y1 - y0;
+        for (int i = 0; i < n; i++) {
+            for (int q = -r; q < rows + r; q++) {
+                const int yq = y0 + q;
+                const float *pa = luma_at(ya, x + ax[i], yq + ay[i]), *pb = luma_at(yb, x - bx[i], yq - by[i]);
+                const vxf cur = vx_abs(vx_sub(vx_loadu(pa), vx_loadu(pb)), &ABS_F);
+                vxf sum = cur;
+                if (h > 0) {
+                    const vxf prev = vx_abs(vx_sub(vx_loadu(luma_at(ya, x - 16 + ax[i], yq + ay[i])), vx_loadu(luma_at(yb, x - 16 - bx[i], yq - by[i]))), &ABS_F);
+                    const vxf next = vx_abs(vx_sub(vx_loadu(luma_at(ya, x + 16 + ax[i], yq + ay[i])), vx_loadu(luma_at(yb, x + 16 - bx[i], yq - by[i]))), &ABS_F);
+                    sum = vx_add(sum, vx_add(vx_alignr(cur, prev, 15), vx_alignr(next, cur, 1)));
+                    if (h > 1)
+                        sum = vx_add(sum, vx_add(vx_alignr(cur, prev, 14), vx_alignr(next, cur, 2)));
+                }
+                vx_store(cols[i][q + r], sum);
+            }
+        }
+        vxf cost[PICK_MAX];
+        for (int i = 0; i < n; i++) {
+            vxf c = vx_load(cols[i][0]);
+            for (int q = 1; q <= 2 * r; q++)
+                c = vx_add(c, vx_load(cols[i][q]));
+            cost[i] = c;
+        }
+        for (int s = 0; s < rows; s++) {
+            const int y = y0 + s;
+            /* The window of row s is cols[s .. s + 2 r]. */
+            vxu px = mean_bytes(vxu_loadu(row_at(a, x + ax[0], y + ay[0])), vxu_loadu(row_at(b, x - bx[0], y - by[0])));
+            vxf best = cost[0];
+            for (int i = 1; i < n; i++) {
+                const vxf c = vx_add(cost[i], vbias);
+                const vxk k = vx_cmp(c, best, VX_CMP_LT);
+                if (k) {
+                    px = vxu_blend(k, px, mean_bytes(vxu_loadu(row_at(a, x + ax[i], y + ay[i])), vxu_loadu(row_at(b, x - bx[i], y - by[i]))));
+                    best = vx_blend(k, best, c);
+                }
+            }
+            vxu_store_nr(bgra_row(out, y) + x, px);
+            if (s + 1 < rows)
+                for (int i = 0; i < n; i++)
+                    cost[i] = vx_add(vx_sub(cost[i], vx_load(cols[i][s])), vx_load(cols[i][s + 2 * r + 1]));
         }
     }
     img_fence();

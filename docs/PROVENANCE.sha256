@@ -1,4 +1,4 @@
-# Copied unchanged from Intel-Phi-VisionTrack, commit ac165e8. sha256 of the source at the moment of the copy.
+# Copied unchanged from Intel-Phi-VisionTrack, commit ac165e8. sha256 of the source at the moment of the copy. framegen.c and framegen.h have since changed here by one setting: docs/INDEX.md.
 387b97ff003c32f86b663d4eaca5ad91ef349c076f71ab024fffef7f8d9e3fe7  src/kern/framegen.c
 a7231a10ee179e091e91b8ebf6c62d009b1522c9f6c51ee1e386b4c1e94345d1  src/kern/framegen.h
 07c9b1b671d18cfcddf07dcd1c168e64ccc2c69995f3c9e609da8da5b67fa493  src/kern/plane.h

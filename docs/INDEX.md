@@ -14,13 +14,14 @@ Which AMD version: the `_v5` shaders of FSR 3's frame-generation path, `Kits/Fid
 | Upscale, best of 4 by SAD over 4 x 4 | `fg_upscale` | `ScaleOpticalFlowAdvanced`, `scale_optical_flow_advanced_v5.h` | Yes: same offsets, same `* 2` |
 | Motion off at a scene change | `scene_changed` in search and upscale | `IsSceneChanged()` | Yes in effect; the test is the port's |
 
-Deviations from AMD inside those stages: the field is built at half resolution (AMD's is at full, per the GPUOpen manual), and `FG_ENOUGH` skips the search on level 0 when the estimate already explains the block.
+Deviations from AMD inside those stages: `fg_job.enough` skips the search on the finest level when the estimate already explains the block. The port built its field at half resolution; the default form here (`FLOW_PIXEL`) builds it at full, as AMD does per the GPUOpen manual, and `mvexflow --half` keeps the port's way.
 
 | Stage | Where | Whose |
 |---|---|---|
 | Scene test: 9 sections, 64 bins, L1 over 0.5 | `fg_hist_section`, `fg_scene_verdict` | The port's, not AMD's divergence |
 | The vector at the middle instant | `fg_mid_vectors` | The port's. FSR 3 interpolation leans on a game's motion vectors, which a screen does not have |
-| The picture: triangle windows over 9 blocks | `fg_blend` | The port's, grey |
+| The picture at half size: triangle windows over 9 blocks | `fg_blend`, and `bgra_blend_vx` in colour | The port's, grey; new here in colour |
+| The picture at full size: a vector per pixel, whole-pixel samples | `bgra_pick_vx` | New here |
 | Colour: BGRx to luma, a picture of 16 BGRA pixels a register | `src/kern/bgra.c` | New here |
 | Order of the stages, taken out of the tracker | `src/kern/flow.c` | From `track.c`: `tk_generate_make`, `fg_build_more`, the chunked `OP_FG_*` dispatch, the rule `w >= 16 && h >= 16` for levels |
 
@@ -32,7 +33,7 @@ The port was never compared against AMD's shaders on a GPU. Its agreement with i
 
 | Copied unchanged | From `Intel-Phi-VisionTrack` | Role |
 |---|---|---|
-| `src/kern/framegen.{c,h}` | same path | The port |
+| `src/kern/framegen.{c,h}` | same path | The port. One change since the copy: `FG_ENOUGH` became `fg_job.enough`, its default the same |
 | `src/kern/plane.h`, `img.h`, `img_vx.c`, `img_ref.c` | same path | F32 planes, padding, the pyramid's `img_reduce_vx` |
 | `src/common/vx.h`, `vt_util.h` | same path | Every MVEX operation with its host lane model; cycle counter, FNV |
 | `src/card/team.{c,h}`, `topo.{c,h}`, `arena.{c,h}`, `vt_dma.{c,h}` | same path | Spinning pinned team, topology, huge pages, the card's own DMA channel |

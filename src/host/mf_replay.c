@@ -5,6 +5,7 @@
  * Frames come from a synthetic scene (exact truth at every half step) or a raw BGRA file. No window, nothing on the monitor. */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <pthread.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,11 +52,30 @@ static void tex_make(void)
 
 static inline uint32_t tex_at(int x, int y) { return tex[(size_t)((y % TEX_H + TEX_H) % TEX_H) * TEX_W + (size_t)((x % TEX_W + TEX_W) % TEX_W)]; }
 
-enum { S_STILL, S_WINDOW, S_PAN, S_SCROLL, S_FAST };
+enum { S_STILL, S_WINDOW, S_PAN, S_SCROLL, S_FAST, S_PAN7, S_SCROLL7, S_BOTH53 };
 
 /* Frame k of the base rate: every speed below is a whole number of pixels a base frame, so a given pair's half way is exact. */
+/* The odd scenes: the texture read as a picture twice the size, box-filtered down, at positions in half pixels: an odd number of pixels a given frame, and the frame half way sits on a half pixel, as real motion does. */
+static void scene_half(int hx, int hy, const struct bgra *d)
+{
+    for (int y = 0; y < H; y++) {
+        uint32_t *r = bgra_row(d, y);
+        for (int x = 0; x < W; x++) {
+            const uint32_t t0 = tex_at(2 * x + hx, 2 * y + hy), t1 = tex_at(2 * x + 1 + hx, 2 * y + hy), t2 = tex_at(2 * x + hx, 2 * y + 1 + hy), t3 = tex_at(2 * x + 1 + hx, 2 * y + 1 + hy);
+            uint32_t v = 0xff000000u;
+            for (int s = 0; s < 24; s += 8)
+                v |= ((((t0 >> s) & 255u) + ((t1 >> s) & 255u) + ((t2 >> s) & 255u) + ((t3 >> s) & 255u) + 2u) >> 2) << s;
+            r[x] = v;
+        }
+    }
+}
+
 static void scene_render(int scene, int k, const struct bgra *d)
 {
+    if (scene == S_PAN7 || scene == S_SCROLL7 || scene == S_BOTH53) {
+        scene_half(scene == S_SCROLL7 ? 0 : scene == S_PAN7 ? 7 * k : 5 * k, scene == S_PAN7 ? 0 : scene == S_SCROLL7 ? 7 * k : 3 * k, d);
+        return;
+    }
     for (int y = 0; y < H; y++) {
         uint32_t *r = bgra_row(d, y);
         for (int x = 0; x < W; x++) {
@@ -112,10 +132,25 @@ static void file_frame(int k, const struct bgra *d)
 struct sse {
     double gen, avg, rep;
     uint64_t n;
+    double grad_gen, grad_truth, grad_avg;
 };
 
 static void sse_add(struct sse *q, const struct bgra *gen, const struct bgra *truth, const struct bgra *a, const struct bgra *b, int x0, int y0, int x1, int y1)
 {
+    /* Sharpness: the green channel's differences to the right and below, generated and the mean of the two against the truth. 1.000 is as sharp as what really happened. */
+    for (int y = y0; y < y1 - 1; y++) {
+        const uint32_t *g = bgra_row(gen, y) + x0, *t = bgra_row(truth, y) + x0, *pa = bgra_row(a, y) + x0, *pb = bgra_row(b, y) + x0;
+        const uint32_t *g2 = bgra_row(gen, y + 1) + x0, *t2 = bgra_row(truth, y + 1) + x0, *pa2 = bgra_row(a, y + 1) + x0, *pb2 = bgra_row(b, y + 1) + x0;
+#define G_OF(w) ((int)(((w) >> 8) & 255u))
+#define MEAN_OF(u, v) ((G_OF(u) + G_OF(v) + 1) >> 1)
+        for (int i = 0; i < x1 - x0 - 1; i++) {
+            q->grad_gen += abs(G_OF(g[i + 1]) - G_OF(g[i])) + abs(G_OF(g2[i]) - G_OF(g[i]));
+            q->grad_truth += abs(G_OF(t[i + 1]) - G_OF(t[i])) + abs(G_OF(t2[i]) - G_OF(t[i]));
+            q->grad_avg += abs(MEAN_OF(pa[i + 1], pb[i + 1]) - MEAN_OF(pa[i], pb[i])) + abs(MEAN_OF(pa2[i], pb2[i]) - MEAN_OF(pa[i], pb[i]));
+        }
+#undef MEAN_OF
+#undef G_OF
+    }
     for (int y = y0; y < y1; y++) {
         const uint8_t *g = (const uint8_t *)(bgra_row(gen, y) + x0), *t = (const uint8_t *)(bgra_row(truth, y) + x0), *pa = (const uint8_t *)(bgra_row(a, y) + x0), *pb = (const uint8_t *)(bgra_row(b, y) + x0);
         for (int i = 0; i < (x1 - x0) * 4; i++) {
@@ -145,16 +180,39 @@ static uint32_t median_of(uint32_t *v, int n)
     return v[n / 2];
 }
 
-static void one_runner(void *ctx, flow_fn fn, void *arg)
+/* The lane model on a few of the host's threads: new ones each round, a frame has some thirty. The answer does not depend on how many. */
+struct pool_job {
+    flow_fn fn;
+    void *arg;
+    int tid, n;
+};
+static void *pool_main(void *p)
 {
-    (void)ctx;
-    fn(arg, 0, 1);
+    const struct pool_job *j = p;
+    j->fn(j->arg, j->tid, j->n);
+    return NULL;
+}
+static void pool_runner(void *ctx, flow_fn fn, void *arg)
+{
+    const int n = *(const int *)ctx;
+    pthread_t t[32];
+    struct pool_job jobs[32];
+    for (int i = 1; i < n; i++) {
+        jobs[i] = (struct pool_job){fn, arg, i, n};
+        pthread_create(&t[i], NULL, pool_main, &jobs[i]);
+    }
+    fn(arg, 0, n);
+    for (int i = 1; i < n; i++)
+        pthread_join(t[i], NULL);
 }
 
 int main(int argc, char **argv)
 {
     const char *scene_name = "window", *path = NULL, *form_name = "fused";
     int gap = 2, count = 12, tpc = 2, cores = 60, ref = 0;
+    int model_threads = 0, pick_r = -1, pick_h = -1, pick_bias = -1, enough = -1;
+    const char *dump = NULL;
+    int dump_x = 400, dump_y = 200;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scene") && i + 1 < argc)
             scene_name = argv[++i];
@@ -170,14 +228,28 @@ int main(int argc, char **argv)
             cores = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--form") && i + 1 < argc)
             form_name = argv[++i];
+        else if (!strcmp(argv[i], "--dump") && i + 3 < argc) {
+            dump = argv[++i];
+            dump_x = atoi(argv[++i]);
+            dump_y = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--model") && i + 1 < argc)
+            model_threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pick-r") && i + 1 < argc)
+            pick_r = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pick-h") && i + 1 < argc)
+            pick_h = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pick-bias") && i + 1 < argc)
+            pick_bias = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--enough") && i + 1 < argc)
+            enough = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ref"))
             ref = 1;
         else {
-            fprintf(stderr, "usage: mf_replay [--scene still|window|pan|scroll|fast | --file F.bgra] [--gap G] [--count N] [--tpc T] [--cores C] [--form fused|plain] [--ref]\n");
+            fprintf(stderr, "usage: mf_replay [--scene still|window|pan|scroll|fast|pan7|scroll7|both53 | --file F.bgra] [--gap G] [--count N] [--tpc T] [--cores C] [--form fused|plain|pixel] [--ref] [--model THREADS] [--pick-r R] [--pick-h H] [--pick-bias Q6] [--enough Q6]\n");
             return 2;
         }
     }
-    const int form = !strcmp(form_name, "plain") ? FLOW_PLAIN : FLOW_FUSED;
+    const int form = !strcmp(form_name, "plain") ? FLOW_PLAIN : !strcmp(form_name, "pixel") ? FLOW_PIXEL : FLOW_FUSED;
     int scene = S_WINDOW;
     if (!strcmp(scene_name, "still"))
         scene = S_STILL;
@@ -187,6 +259,12 @@ int main(int argc, char **argv)
         scene = S_SCROLL;
     else if (!strcmp(scene_name, "fast"))
         scene = S_FAST;
+    else if (!strcmp(scene_name, "pan7"))
+        scene = S_PAN7;
+    else if (!strcmp(scene_name, "scroll7"))
+        scene = S_SCROLL7;
+    else if (!strcmp(scene_name, "both53"))
+        scene = S_BOTH53;
     if (path) {
         const int fd = open(path, O_RDONLY);
         struct stat st;
@@ -203,12 +281,20 @@ int main(int argc, char **argv)
         tex_make();
     }
     struct mf_link l;
-    if (mf_link_open(&l))
+    if (model_threads) {
+        /* No card, no session: the part is plain memory here. */
+        if (posix_memalign((void **)&l.part, 4096, (size_t)MF_PART_BYTES))
+            return 1;
+        l.ctl = (struct mf_ctl *)l.part;
+        memset(l.part, 0, (size_t)MF_IN_OFFSET);
+        ref = 1;
+    } else if (mf_link_open(&l))
         return 1;
-    const struct mf_config cfg = {.w = (uint32_t)W, .h = (uint32_t)H, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form};
-    if (mf_session_start(&l, &cfg, 30.0))
+    const struct mf_config cfg = {.w = (uint32_t)W, .h = (uint32_t)H, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .pick_r = (uint32_t)(pick_r + 1), .pick_h = (uint32_t)(pick_h + 1), .pick_bias = (uint32_t)(pick_bias + 1), .enough = (uint32_t)(enough + 1)};
+    if (!model_threads && mf_session_start(&l, &cfg, 30.0))
         return 1;
-    printf("session: %u cores, %u threads, tsc %u MHz, form %s\n", l.ctl->card_cores, l.ctl->card_threads, l.ctl->card_mhz, form_name);
+    if (!model_threads)
+        printf("session: %u cores, %u threads, tsc %u MHz, form %s\n", l.ctl->card_cores, l.ctl->card_threads, l.ctl->card_mhz, form_name);
     struct flow *model = NULL;
     if (ref) {
         if (posix_memalign((void **)&model, 64, sizeof *model))
@@ -217,14 +303,26 @@ int main(int argc, char **argv)
         if (posix_memalign(&mem, 4096, flow_bytes(W, H, form)))
             return 1;
         memset(mem, 0, flow_bytes(W, H, form));
-        if (flow_init(model, mem, W, H, form, one_runner, NULL))
+        static int pool_n;
+        pool_n = model_threads ? model_threads : 8;
+        if (flow_init(model, mem, W, H, form, pool_runner, &pool_n))
             return 1;
+        if (pick_r >= 0)
+            model->pick_r = pick_r;
+        if (pick_h >= 0)
+            model->pick_h = pick_h;
+        if (pick_bias >= 0)
+            model->pick_bias = (float)pick_bias;
+        if (enough >= 0)
+            model->fg.enough = (float)enough;
     }
     void *tm, *hm, *am;
     if (posix_memalign(&tm, 64, bgra_bytes(W, H)) || posix_memalign(&hm, 64, bgra_bytes(W, H)) || posix_memalign(&am, 64, bgra_bytes(W, H)))
         return 1;
     const struct bgra truth = bgra_at(tm, W, H), newer = bgra_at(hm, W, H), older = bgra_at(am, W, H);
-    struct sse whole = {0, 0, 0, 0}, moving = {0, 0, 0, 0};
+    struct sse whole, moving;
+    memset(&whole, 0, sizeof whole);
+    memset(&moving, 0, sizeof moving);
     uint64_t diff_px = 0, compared_px = 0, moved_mismatch = 0, control_caught = 0;
     uint64_t moved_sum = 0;
     int made_n = 0, scene_n = 0;
@@ -240,34 +338,40 @@ int main(int argc, char **argv)
             scene_render(scene, k, &in);
         memcpy(bgra_base(&newer), bgra_base(&in), bgra_bytes(W, H));
         const uint64_t seq = (uint64_t)i + 1;
-        struct mf_msg *m = &c->msg[seq % MF_RING];
-        m->seq = seq;
-        m->in_slot = slot;
-        m->out_slot = slot;
-        m->flags = i == 0 ? MF_NO_MID : 0;
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        c->frames_pub = seq;
-        const uint64_t t0 = mf_now_ns();
-        while (c->gen_pub < seq) {
-            if ((double)(mf_now_ns() - t0) * 1e-9 > 20.0) {
-                fprintf(stderr, "no answer from the card for frame %d\n", i);
-                return 1;
+        struct mf_gen g;
+        memset(&g, 0, sizeof g);
+        if (!model_threads) {
+            struct mf_msg *m = &c->msg[seq % MF_RING];
+            m->seq = seq;
+            m->in_slot = slot;
+            m->out_slot = slot;
+            m->flags = i == 0 ? MF_NO_MID : 0;
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            c->frames_pub = seq;
+            const uint64_t t0 = mf_now_ns();
+            while (c->gen_pub < seq) {
+                if ((double)(mf_now_ns() - t0) * 1e-9 > 20.0) {
+                    fprintf(stderr, "no answer from the card for frame %d\n", i);
+                    return 1;
+                }
+                struct timespec nap = {0, 100000};
+                nanosleep(&nap, NULL);
             }
-            struct timespec nap = {0, 100000};
-            nanosleep(&nap, NULL);
+            g = c->gen[seq % MF_RING];
         }
-        const struct mf_gen g = c->gen[seq % MF_RING];
         for (int t = 0; t < MF_T_COUNT; t++)
             if (g.made == 1 && made_n < 4096)
                 us[t][made_n] = g.us[t];
-        if (g.made == 1)
-            moved_sum += g.moved;
-        if (g.made == 0)
-            scene_n++;
         if (model) {
             memcpy(bgra_base(flow_next_frame(model)), bgra_base(&in), bgra_bytes(W, H));
             flow_land(model);
             const int mm = i ? flow_make(model) : -1;
+            if (model_threads) {
+                g.made = mm;
+                g.moved = model->moved;
+                if (mm == 1)
+                    memcpy(bgra_base(&out), bgra_base(&model->out), bgra_bytes(W, H));
+            }
             if (mm != g.made)
                 printf("frame %d: card made %d, model %d\n", i, g.made, mm);
             if (mm == 1) {
@@ -286,8 +390,36 @@ int main(int argc, char **argv)
                 bgra_row(&model->out, H / 2)[W / 2] = keep;
             }
         }
+        if (g.made == 0)
+            scene_n++;
         if (g.made == 1) {
+            moved_sum += g.moved;
             made_n++;
+            if (dump && made_n == 3 && gap % 2 == 0) {
+                /* A close look: the generated picture, the truth and their difference side by side, at a crop of the picture. */
+                if (path)
+                    file_frame(k - gap / 2, &truth);
+                else
+                    scene_render(scene, k - gap / 2, &truth);
+                char name[256];
+                snprintf(name, sizeof name, "%s.ppm", dump);
+                FILE *fp = fopen(name, "wb");
+                const int cw = 400, ch = 300;
+                fprintf(fp, "P6\n%d %d\n255\n", 3 * cw, ch);
+                for (int y = 0; y < ch; y++)
+                    for (int v = 0; v < 3; v++)
+                        for (int x = 0; x < cw; x++) {
+                            const uint32_t pg = bgra_row(&out, y + dump_y)[x + dump_x], pt = bgra_row(&truth, y + dump_y)[x + dump_x];
+                            const uint32_t pd = v == 0 ? pg : pt;
+                            uint8_t rgb[3];
+                            for (int q = 0; q < 3; q++) {
+                                const int a1 = (int)((pg >> (16 - 8 * q)) & 255u), a2 = (int)((pt >> (16 - 8 * q)) & 255u), d = abs(a1 - a2) * 4;
+                                rgb[q] = v == 2 ? (uint8_t)(d > 255 ? 255 : d) : (uint8_t)((pd >> (16 - 8 * q)) & 255u);
+                            }
+                            fwrite(rgb, 1, 3, fp);
+                        }
+                fclose(fp);
+            }
             if (gap >= 2 && gap % 2 == 0) {
                 if (path)
                     file_frame(k - gap / 2, &truth);
@@ -309,13 +441,17 @@ int main(int argc, char **argv)
         }
         memcpy(bgra_base(&older), bgra_base(&newer), bgra_bytes(W, H));
     }
-    mf_session_end(&l, 5.0);
-    printf("%s gap %d: %d frames, %d generated, %d scene changes, %.1f %% blocks moved\n", scene_name, gap, count, made_n, scene_n, made_n ? 100.0 * (double)moved_sum / (double)made_n / (double)(((W + 15) / 16) * ((H + 15) / 16)) : 0.0);
+    if (!model_threads)
+        mf_session_end(&l, 5.0);
+    printf("%s gap %d: %d frames, %d generated, %d scene changes, %.1f %% blocks moved\n", scene_name, gap, count, made_n, scene_n, made_n ? 100.0 * (double)moved_sum / (double)made_n / (double)(form == FLOW_PIXEL ? ((W + 7) / 8) * ((H + 7) / 8) : ((W + 15) / 16) * ((H + 15) / 16)) : 0.0);
     if (whole.n)
         printf("dB whole  generated %.3f, mean of two %.3f, older again %.3f\n", db(whole.gen, whole.n), db(whole.avg, whole.n), db(whole.rep, whole.n));
     if (moving.n)
         printf("dB moving generated %.3f, mean of two %.3f, older again %.3f (%.1f %% of samples)\n", db(moving.gen, moving.n), db(moving.avg, moving.n), db(moving.rep, moving.n), 100.0 * (double)moving.n / (double)whole.n);
+    if (moving.n)
+        printf("sharpness moving, against the truth: generated %.3f, mean of two %.3f\n", moving.grad_gen / moving.grad_truth, moving.grad_avg / moving.grad_truth);
     static const char *const names[MF_T_COUNT] = {"dma_in", "land", "pyr", "hist", "search", "filter", "up", "mid", "blend", "dma_out", "total"};
+    if (!model_threads) {
     printf("card us, median:");
     for (int t = 0; t < MF_T_COUNT; t++) {
         uint32_t mx = 0;
@@ -326,7 +462,8 @@ int main(int argc, char **argv)
             printf(" (max %u)", mx);
     }
     printf("\n");
-    if (ref) {
+    }
+    if (ref && !model_threads) {
         printf("card = lane model: %llu of %llu pixels differ, moved mismatches %llu; control caught %llu of %d\n", (unsigned long long)diff_px, (unsigned long long)compared_px, (unsigned long long)moved_mismatch, (unsigned long long)control_caught, made_n);
         if (diff_px || moved_mismatch || (int)control_caught != made_n)
             return 1;

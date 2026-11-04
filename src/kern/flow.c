@@ -8,13 +8,13 @@
 
 #define CHUNK 16 /* blocks or tiles taken at a time */
 
-enum { OP_LAND, OP_REDUCE, OP_HIST_A, OP_HIST_B, OP_SEARCH, OP_FILTER, OP_UP, OP_MID, OP_BLEND, OP_BLEND_PLAIN, OP_MERGE };
+enum { OP_LAND, OP_REDUCE, OP_HIST_A, OP_HIST_B, OP_SEARCH, OP_FILTER, OP_UP, OP_MID, OP_BLEND, OP_BLEND_PLAIN, OP_MERGE, OP_PICK };
 
 static inline int row_of(int h, int tid, int n) { return (int)((int64_t)h * tid / n); }
 
-int flow_levels(int w, int h)
+int flow_levels(int w, int h, int form)
 {
-    int ww = (w + 1) / 2, hh = (h + 1) / 2, count = 0;
+    int ww = form == FLOW_PIXEL ? w : (w + 1) / 2, hh = form == FLOW_PIXEL ? h : (h + 1) / 2, count = 0;
     for (int i = 0; i < FG_MAX_LEVELS && ww >= 16 && hh >= 16; i++) {
         count++;
         ww = (ww + 1) / 2;
@@ -25,9 +25,9 @@ int flow_levels(int w, int h)
 
 size_t flow_bytes(int w, int h, int form)
 {
-    const int levels = flow_levels(w, h);
+    const int levels = flow_levels(w, h, form);
     size_t n = 3u * bgra_bytes(w, h) + plane_bytes(w, h);
-    int ww = (w + 1) / 2, hh = (h + 1) / 2;
+    int ww = form == FLOW_PIXEL ? w : (w + 1) / 2, hh = form == FLOW_PIXEL ? h : (h + 1) / 2;
     n += fg_bytes(ww, hh, levels);
     for (int i = 0; i < levels; i++) {
         n += 2u * plane_bytes(ww, hh);
@@ -57,13 +57,13 @@ int flow_init(struct flow *f, void *mem, int w, int h, int form, flow_run_fn run
     f->form = form;
     f->run = run;
     f->run_ctx = ctx;
-    f->levels = flow_levels(w, h);
+    f->levels = flow_levels(w, h, form);
     f->hist_frame = ~0ull;
     for (int i = 0; i < 2; i++)
         f->frame[i] = bgra_at(carve(&m, bgra_bytes(w, h)), w, h);
     f->out = bgra_at(carve(&m, bgra_bytes(w, h)), w, h);
     f->y = plane_at(carve(&m, plane_bytes(w, h)), w, h);
-    int ww = (w + 1) / 2, hh = (h + 1) / 2;
+    int ww = form == FLOW_PIXEL ? w : (w + 1) / 2, hh = form == FLOW_PIXEL ? h : (h + 1) / 2;
     const size_t fgb = fg_bytes(ww, hh, f->levels);
     fg_init(&f->fg, carve(&m, fgb), ww, hh, f->levels);
     for (int i = 0; i < f->levels; i++) {
@@ -79,6 +79,13 @@ int flow_init(struct flow *f, void *mem, int w, int h, int form, flow_run_fn run
             f->chan_out[c] = plane_at(carve(&m, plane_bytes(w, h)), w, h);
         }
     f->tiles = ((w + 15) / 16) * ((h + 15) / 16);
+    f->pick_r = 2;
+    f->pick_h = 2;
+    f->pick_bias = 0.0f;
+    /* The prediction from the level above is always even: under a loose early-out, faint detail moving an odd distance would keep it and blur. A quarter of a grey level a pixel: measured 1.5 ms dearer than the port's 2 on real footage. */
+    if (form == FLOW_PIXEL)
+        f->fg.enough = 1024.0f;
+    f->hist_level = form == FLOW_PIXEL ? 2 : 1;
     return 0;
 }
 
@@ -91,8 +98,9 @@ static void flow_main(void *arg, int tid, int n)
         const struct bgra *s = &f->frame[f->newest];
         const int y0 = row_of(f->h, tid, n), y1 = row_of(f->h, tid + 1, n);
         bgra_pad_rows(s, y0, y1);
-        bgra_luma_vx(&f->y, s, y0, y1);
-        img_pad_rows(&f->y, y0, y1);
+        const struct vt_plane *y = f->form == FLOW_PIXEL ? &f->pyr[f->newest][0] : &f->y;
+        bgra_luma_vx(y, s, y0, y1);
+        img_pad_rows(y, y0, y1);
         if (f->form == FLOW_PLAIN) {
             const struct vt_plane *c = f->chan[f->newest];
             bgra_split_vx(c, s, y0, y1);
@@ -117,9 +125,9 @@ static void flow_main(void *arg, int tid, int n)
             if (s >= FG_SECTIONS)
                 break;
             if (op == OP_HIST_A)
-                fg_hist_section(&f->fg.a[1], f->fg.hist_a, s);
+                fg_hist_section(&f->fg.a[f->hist_level], f->fg.hist_a, s);
             else
-                fg_hist_section(&f->fg.b[1], f->fg.hist_b, s);
+                fg_hist_section(&f->fg.b[f->hist_level], f->fg.hist_b, s);
         }
         break;
     case OP_SEARCH:
@@ -164,6 +172,14 @@ static void flow_main(void *arg, int tid, int n)
         }
         img_fence();
         break;
+    case OP_PICK:
+        for (;;) {
+            const int i = __atomic_fetch_add(&f->next, CHUNK, __ATOMIC_RELAXED);
+            if (i >= f->tiles)
+                break;
+            bgra_pick_vx(&f->fg.mid, &f->fg.fil[1], &f->pyr[!f->newest][0], &f->pyr[f->newest][0], &f->frame[!f->newest], &f->frame[f->newest], &f->out, f->pick_r, f->pick_h, f->pick_bias, i, i + CHUNK < f->tiles ? i + CHUNK : f->tiles);
+        }
+        break;
     case OP_MERGE:
         bgra_merge_vx(&f->out, f->chan_out, row_of(f->h, tid, n), row_of(f->h, tid + 1, n));
         break;
@@ -188,14 +204,14 @@ void flow_land(struct flow *f)
     memset(f->cycles, 0, sizeof f->cycles);
     round_of(f, OP_LAND, 0);
     bgra_pad_tb(&f->frame[f->newest]);
-    img_pad_tb(&f->y);
+    img_pad_tb(f->form == FLOW_PIXEL ? &f->pyr[f->newest][0] : &f->y);
     if (f->form == FLOW_PLAIN)
         for (int c = 0; c < 3; c++)
             img_pad_tb(&f->chan[f->newest][c]);
     uint64_t now = vt_tsc();
     f->cycles[FLOW_LAND] = now - mark;
     mark = now;
-    for (int L = 0; L < f->levels; L++) {
+    for (int L = f->form == FLOW_PIXEL ? 1 : 0; L < f->levels; L++) {
         round_of(f, OP_REDUCE, L);
         img_pad_tb(&f->pyr[f->newest][L]);
     }
@@ -249,7 +265,9 @@ int flow_make(struct flow *f)
         moved += (j->mid.v[i].x | j->mid.v[i].y) != 0;
     f->moved = moved;
     LAP(FLOW_MID);
-    if (f->form == FLOW_PLAIN) {
+    if (f->form == FLOW_PIXEL) {
+        round_of(f, OP_PICK, 0);
+    } else if (f->form == FLOW_PLAIN) {
         for (int c = 0; c < 3; c++) {
             f->fgc[c] = *j;
             f->fgc[c].a0 = f->chan[older][c];

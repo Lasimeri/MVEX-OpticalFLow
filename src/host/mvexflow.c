@@ -346,7 +346,7 @@ int main(int argc, char **argv)
 {
     static struct app a;
     uint32_t node = 0;
-    int tpc = 2, cores = 60, form = 0, seconds = 0, no_excl = 0;
+    int tpc = 2, cores = 60, form = 2, seconds = 0, no_excl = 0;
     const char *output = NULL;
     a.w_px = 1366;
     a.h_px = 768;
@@ -360,6 +360,8 @@ int main(int argc, char **argv)
             tpc = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cores") && i + 1 < argc)
             cores = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--half"))
+            form = 0;
         else if (!strcmp(argv[i], "--plain"))
             form = 1;
         else if (!strcmp(argv[i], "--pass"))
@@ -369,7 +371,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-excl"))
             no_excl = 1;
         else {
-            fprintf(stderr, "usage: mvexflow --node N --output NAME [--tpc T] [--cores C] [--plain] [--pass] [--seconds S]\n");
+            fprintf(stderr, "usage: mvexflow --node N --output NAME [--tpc T] [--cores C] [--half] [--plain] [--pass] [--seconds S]\n");
             return 2;
         }
     }
@@ -387,7 +389,7 @@ int main(int argc, char **argv)
         const struct mf_config cfg = {.w = (uint32_t)a.w_px, .h = (uint32_t)a.h_px, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form};
         if (mf_session_start(&a.l, &cfg, 15.0))
             return 1;
-        printf("card: %u cores, %u threads, tsc %u MHz, form %s\n", a.l.ctl->card_cores, a.l.ctl->card_threads, a.l.ctl->card_mhz, form ? "plain" : "fused");
+        printf("card: %u cores, %u threads, tsc %u MHz, form %s\n", a.l.ctl->card_cores, a.l.ctl->card_threads, a.l.ctl->card_mhz, form == 2 ? "pixel" : form == 1 ? "plain" : "fused");
     }
     const struct wlp_cb cb = {&a, on_presented, on_discarded, on_released};
     a.w = wlp_open(output, a.w_px, a.h_px, 1, &cb);

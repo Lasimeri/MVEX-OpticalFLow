@@ -41,6 +41,7 @@ struct fg_job {
     struct fg_field raw[FG_MAX_LEVELS], fil[FG_MAX_LEVELS], up[FG_MAX_LEVELS], mid; /* up[L]: what level L starts from */
     uint32_t *hist_a, *hist_b;                          /* FG_SECTIONS x FG_BINS */
     int scene_changed;
+    float enough;                                       /* Q6 counts over a block under which the last level keeps the estimate without a search */
 };
 
 /* Bytes fg_init needs for a field-level picture of w x h with this many levels. */

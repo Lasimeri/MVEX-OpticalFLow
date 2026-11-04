@@ -8,7 +8,7 @@
 #define R(x) ((long double)(x))
 #define FG_RADIUS 8                /* AMD's search: offsets -8 .. +7 each way, 256 places */
 #define FG_TIE_UNIT 1.0f           /* Q6 counts per pixel of offset, added to a place's SAD: a quarter of a grey level at most over a block, so that it only breaks ties, toward less motion */
-#define FG_ENOUGH 8192.0f          /* Q6 counts over a block: 2 grey levels a pixel, about sensor noise at half resolution */
+#define FG_ENOUGH 8192.0f          /* Q6 counts over a block: 2 grey levels a pixel, about sensor noise at half resolution: the default of fg_job.enough */
 #define FG_SCENE_L1 0.5L          /* of a section's samples in different bins, on average over the nine: the picture has changed */
 #define FG_MID_FAVOUR_ZERO 64.0f   /* Q6 counts: one grey level over a block, in favour of no motion at the middle instant, for still things under sensor noise */
 
@@ -39,6 +39,7 @@ void fg_init(struct fg_job *j, void *mem, int w, int h, int levels)
 {
     char *m = mem;
     j->levels = levels;
+    j->enough = FG_ENOUGH;
     j->hist_a = (uint32_t *)m;
     j->hist_b = j->hist_a + FG_SECTIONS * FG_BINS;
     m += 2u * FG_SECTIONS * FG_BINS * sizeof(uint32_t);
@@ -131,7 +132,7 @@ void fg_search(const struct fg_job *j, int level, int i0, int i1)
             vxf at_pred = nil;
             for (int r = 0; r < FG_BLOCK; r++)
                 at_pred = vx_add(at_pred, vx_blend(EIGHT_LANES, nil, vx_abs(vx_sub(vx_load(blk[r]), vx_loadu(row_at(old, px + pvx, py + r + pvy))), &ABS_LANE)));
-            if (vx_hsum(at_pred) <= FG_ENOUGH) {
+            if (vx_hsum(at_pred) <= j->enough) {
                 o->x = (int16_t)pvx;
                 o->y = (int16_t)pvy;
                 continue;

@@ -31,7 +31,8 @@ struct mf_config {
     uint32_t w, h;
     uint32_t cores, tpc; /* 0 cores: the 60 x 2 of the order of 11-04: 59 usable cores and the free threads of the poller core */
     uint32_t form;       /* enum flow_form */
-    uint32_t pad[9];
+    uint32_t pick_r, pick_h, pick_bias, enough; /* FLOW_PIXEL, each plus 1, 0 = default: the window, the bias and the early-out in Q6 counts */
+    uint32_t pad[5];
 };
 
 /* Host to card: a frame is ready. */

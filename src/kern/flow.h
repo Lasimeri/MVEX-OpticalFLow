@@ -10,7 +10,8 @@
 #include "framegen.h"
 
 enum flow_stage { FLOW_LAND, FLOW_PYR, FLOW_HIST, FLOW_SEARCH, FLOW_FILTER, FLOW_UP, FLOW_MID, FLOW_BLEND, FLOW_STAGES };
-enum flow_form { FLOW_FUSED, FLOW_PLAIN };
+/* FUSED, PLAIN: the port's field at half the picture's size, windows over 16 x 16 tiles, the two forms of its picture. PIXEL: the field at the picture's own size, a vector per pixel, whole-pixel samples. */
+enum flow_form { FLOW_FUSED, FLOW_PLAIN, FLOW_PIXEL };
 
 typedef void (*flow_fn)(void *arg, int tid, int n);
 typedef void (*flow_run_fn)(void *ctx, flow_fn fn, void *arg);
@@ -30,10 +31,12 @@ struct flow {
     uint32_t moved;         /* blocks of the last field with a nonzero mid vector */
     /* The round's order. */
     int op, level, tiles;
+    int pick_r, pick_h, hist_level;
+    float pick_bias;
     int next __attribute__((aligned(64)));
 };
 
-int flow_levels(int w, int h);
+int flow_levels(int w, int h, int form);
 size_t flow_bytes(int w, int h, int form);
 /* mem: flow_bytes(), 64 B aligned. 0, or -1. */
 int flow_init(struct flow *f, void *mem, int w, int h, int form, flow_run_fn run, void *ctx);
