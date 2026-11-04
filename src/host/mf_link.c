@@ -48,6 +48,7 @@ int mf_session_start(struct mf_link *l, const struct mf_config *cfg, double time
     c->config.format = mf_format_hash();
     c->frames_pub = 0;
     c->gen_pub = 0;
+    c->mid_pub = 0;
     c->session_end = 0;
     c->quit = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

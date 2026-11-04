@@ -4,7 +4,7 @@
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$mf_root"
 state=out/run
-pages=80
+pages=160
 running() { phic run sh -c 'pgrep mvexflowd' 2>/dev/null | tr -d '\r' || true; }
 case "${1:-}" in
     start)

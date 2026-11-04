@@ -3,12 +3,13 @@
 
 #include <string.h>
 
+#include "deblock.h"
 #include "img.h"
 #include "vt_util.h"
 
 #define CHUNK 16 /* blocks or tiles taken at a time */
 
-enum { OP_LAND, OP_REDUCE, OP_HIST_A, OP_HIST_B, OP_SEARCH, OP_FILTER, OP_UP, OP_MID, OP_BLEND, OP_BLEND_PLAIN, OP_MERGE, OP_PICK };
+enum { OP_LAND, OP_REDUCE, OP_HIST_A, OP_HIST_B, OP_SEARCH, OP_FILTER, OP_UP, OP_MID, OP_BLEND, OP_BLEND_PLAIN, OP_MERGE, OP_PICK, OP_FINE, OP_YM, OP_FSR, OP_FSR_MERGE, OP_DEBLOCK_V, OP_DEBLOCK_H };
 
 static inline int row_of(int h, int tid, int n) { return (int)((int64_t)h * tid / n); }
 
@@ -26,7 +27,7 @@ int flow_levels(int w, int h, int form)
 size_t flow_bytes(int w, int h, int form)
 {
     const int levels = flow_levels(w, h, form);
-    size_t n = 3u * bgra_bytes(w, h) + plane_bytes(w, h);
+    size_t n = 3u * bgra_bytes(w, h) + plane_bytes(w, h) + (size_t)((w + 1) / 2) * (size_t)((h + 1) / 2) * sizeof(struct fg_vec) + 64u;
     int ww = form == FLOW_PIXEL ? w : (w + 1) / 2, hh = form == FLOW_PIXEL ? h : (h + 1) / 2;
     n += fg_bytes(ww, hh, levels);
     for (int i = 0; i < levels; i++) {
@@ -36,6 +37,8 @@ size_t flow_bytes(int w, int h, int form)
     }
     if (form == FLOW_PLAIN)
         n += 9u * plane_bytes(w, h);
+    if (form == FLOW_PIXEL)
+        n += bgra_bytes(w, h) + 2u * plane_bytes(w, h) + fsr_bytes(w, h, w, h, 0, 0) + 4096u;
     return n + 4096u;
 }
 
@@ -79,13 +82,27 @@ int flow_init(struct flow *f, void *mem, int w, int h, int form, flow_run_fn run
             f->chan_out[c] = plane_at(carve(&m, plane_bytes(w, h)), w, h);
         }
     f->tiles = ((w + 15) / 16) * ((h + 15) / 16);
+    f->fine_stride = 8;
+    f->pick_phase = 1;
+    f->fine_mem = form == FLOW_PIXEL ? carve(&m, (size_t)((w + 1) / 2) * (size_t)((h + 1) / 2) * sizeof(struct fg_vec)) : NULL;
     f->pick_r = 2;
     f->pick_h = 2;
     f->pick_bias = 0.0f;
-    /* The prediction from the level above is always even: under a loose early-out, faint detail moving an odd distance would keep it and blur. A quarter of a grey level a pixel: measured 1.5 ms dearer than the port's 2 on real footage. */
-    if (form == FLOW_PIXEL)
-        f->fg.enough = 1024.0f;
     f->hist_level = form == FLOW_PIXEL ? 2 : 1;
+    if (form == FLOW_PIXEL) {
+        f->use_fsr = 1;
+        f->use_deblock = 1;
+        f->db_tc = 2.0f;
+        f->db_beta = 12.0f;
+        f->pic = bgra_at(carve(&m, bgra_bytes(w, h)), w, h);
+        f->ym = plane_at(carve(&m, plane_bytes(w, h)), w, h);
+        f->ym_prev = plane_at(carve(&m, plane_bytes(w, h)), w, h);
+        f->fsr = fsr_init(carve(&m, fsr_bytes(w, h, w, h, 0, 0)), w, h, w, h, 0, 0, 0.0L);
+        if (f->fsr)
+            fsr_set_alpha_floor(f->fsr, 0.95L); /* measured, real footage, generated pictures only: 32.706 dB against 32.737 with no FSR and 26.4 near AMD's own weights: docs/measurements.md */
+        if (!f->fsr)
+            return -1;
+    }
     return 0;
 }
 
@@ -172,14 +189,53 @@ static void flow_main(void *arg, int tid, int n)
         }
         img_fence();
         break;
+    case OP_FINE: {
+        const int count = f->fine.w * f->fine.h;
+        for (;;) {
+            const int i = __atomic_fetch_add(&f->next, 64, __ATOMIC_RELAXED);
+            if (i >= count)
+                break;
+            bgra_fine_vx(&f->fg.mid, &f->fg.fil[1], &f->pyr[!f->newest][0], &f->pyr[f->newest][0], &f->fine, f->fine_stride, i, i + 64 < count ? i + 64 : count);
+        }
+        break;
+    }
     case OP_PICK:
         for (;;) {
             const int i = __atomic_fetch_add(&f->next, CHUNK, __ATOMIC_RELAXED);
             if (i >= f->tiles)
                 break;
-            bgra_pick_vx(&f->fg.mid, &f->fg.fil[1], &f->pyr[!f->newest][0], &f->pyr[f->newest][0], &f->frame[!f->newest], &f->frame[f->newest], &f->out, f->pick_r, f->pick_h, f->pick_bias, i, i + CHUNK < f->tiles ? i + CHUNK : f->tiles);
+            bgra_pick_vx(f->fine_stride < 8 ? &f->fine : &f->fg.mid, f->fine_stride, &f->fg.fil[1], &f->pyr[!f->newest][0], &f->pyr[f->newest][0], &f->frame[!f->newest], &f->frame[f->newest], &f->out, f->pick_r, f->pick_h, f->pick_bias, f->pick_phase, i, i + CHUNK < f->tiles ? i + CHUNK : f->tiles);
         }
         break;
+    case OP_YM: {
+        const int y0 = row_of(f->h, tid, n), y1 = row_of(f->h, tid + 1, n);
+        bgra_pad_rows(&f->out, y0, y1);
+        bgra_luma_vx(&f->ym, &f->out, y0, y1);
+        img_pad_rows(&f->ym, y0, y1);
+        img_fence();
+        break;
+    }
+    case OP_FSR:
+        fsr_stage(f->fsr, f->level, tid, n);
+        img_fence();
+        break;
+    case OP_FSR_MERGE:
+        bgra_fsr_merge_vx(&f->out, &f->ym, fsr_color(f->fsr), &f->pic, row_of(f->h, tid, n), row_of(f->h, tid + 1, n));
+        break;
+    case OP_DEBLOCK_V:
+    case OP_DEBLOCK_H: {
+        const int bands = deblock_bands(f->final);
+        for (;;) {
+            const int i = __atomic_fetch_add(&f->next, 1, __ATOMIC_RELAXED);
+            if (i >= bands)
+                break;
+            if (op == OP_DEBLOCK_V)
+                deblock_v_vx(&f->fg.mid, f->final, f->db_tc, f->db_beta, i, i + 1);
+            else
+                deblock_h_vx(&f->fg.mid, f->final, f->db_tc, f->db_beta, i, i + 1);
+        }
+        break;
+    }
     case OP_MERGE:
         bgra_merge_vx(&f->out, f->chan_out, row_of(f->h, tid, n), row_of(f->h, tid + 1, n));
         break;
@@ -259,6 +315,12 @@ int flow_make(struct flow *f)
         LAP(FLOW_UP);
     }
     round_of(f, OP_MID, 0);
+    if (f->form == FLOW_PIXEL && f->fine_stride < 8) {
+        f->fine.w = (f->w + f->fine_stride - 1) / f->fine_stride;
+        f->fine.h = (f->h + f->fine_stride - 1) / f->fine_stride;
+        f->fine.v = f->fine_mem;
+        round_of(f, OP_FINE, 0);
+    }
     uint32_t moved = 0;
     const int blocks = j->mid.w * j->mid.h;
     for (int i = 0; i < blocks; i++)
@@ -283,3 +345,58 @@ int flow_make(struct flow *f)
 #undef LAP
     return 1;
 }
+
+/* ---- what follows frame generation: FSR, then deblocking, on the generated picture. A real frame has been through neither frame generation nor any block, and goes to the glass as it is. ---- */
+
+static void round2_of(struct flow *f, int op)
+{
+    f->op = op;
+    f->level = 0;
+    __atomic_store_n(&f->next, 0, __ATOMIC_RELAXED);
+    if (f->run2)
+        f->run2(f->run2_ctx, flow_main, f);
+    else
+        f->run(f->run_ctx, flow_main, f);
+}
+
+void flow_finish_generated(struct flow *f)
+{
+    uint64_t mark = vt_tsc();
+    if (f->use_fsr) {
+        const struct vt_plane t = f->ym;
+        f->ym = f->ym_prev;
+        f->ym_prev = t;
+        round_of(f, OP_YM, 0);
+        img_pad_tb(&f->ym);
+        /* At its own size, no upscale, no sharpening; generated pictures come a whole step of the field apart. After a gap in them the history does not carry over. */
+        fsr_set_step(f->fsr, 1.0L);
+        fsr_begin(f->fsr, &f->ym, f->ym_valid ? &f->ym_prev : &f->ym, &f->fg.fil[1], 1.0L, !f->ym_valid);
+        for (int s = 0; s < FSR_STAGES; s++) {
+            if (s == FSR_SHARPEN)
+                continue;
+            const uint64_t s0 = vt_tsc();
+            round_of(f, OP_FSR, s);
+            fsr_stage_end(f->fsr, s);
+            f->fsr_cycles[s] += vt_tsc() - s0;
+        }
+        const uint64_t m0 = vt_tsc();
+        round_of(f, OP_FSR_MERGE, 0);
+        f->fsr_cycles[FSR_STAGES] += vt_tsc() - m0;
+        f->fsr_runs++;
+        fsr_end(f->fsr);
+        f->ym_valid = 1;
+        f->final = &f->pic;
+    } else {
+        f->final = &f->out;
+    }
+    uint64_t now = vt_tsc();
+    f->cycles[FLOW_FSR] += now - mark;
+    mark = now;
+    if (f->use_deblock) {
+        round2_of(f, OP_DEBLOCK_V);
+        round2_of(f, OP_DEBLOCK_H);
+    }
+    f->cycles[FLOW_DEBLOCK] += vt_tsc() - mark;
+}
+
+void flow_no_generated(struct flow *f) { f->ym_valid = 0; }

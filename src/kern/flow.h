@@ -8,8 +8,9 @@
 
 #include "bgra.h"
 #include "framegen.h"
+#include "fsr3.h"
 
-enum flow_stage { FLOW_LAND, FLOW_PYR, FLOW_HIST, FLOW_SEARCH, FLOW_FILTER, FLOW_UP, FLOW_MID, FLOW_BLEND, FLOW_STAGES };
+enum flow_stage { FLOW_LAND, FLOW_PYR, FLOW_HIST, FLOW_SEARCH, FLOW_FILTER, FLOW_UP, FLOW_MID, FLOW_BLEND, FLOW_FSR, FLOW_DEBLOCK, FLOW_STAGES };
 /* FUSED, PLAIN: the port's field at half the picture's size, windows over 16 x 16 tiles, the two forms of its picture. PIXEL: the field at the picture's own size, a vector per pixel, whole-pixel samples. */
 enum flow_form { FLOW_FUSED, FLOW_PLAIN, FLOW_PIXEL };
 
@@ -31,7 +32,21 @@ struct flow {
     uint32_t moved;         /* blocks of the last field with a nonzero mid vector */
     /* The round's order. */
     int op, level, tiles;
-    int pick_r, pick_h, hist_level;
+    int pick_r, pick_h, hist_level, pick_phase;
+    /* What follows frame generation, FLOW_PIXEL: FSR on the first team, native, no sharpening, luma; deblocking on the second. */
+    flow_run_fn run2;
+    void *run2_ctx;
+    struct fsr *fsr;
+    int use_fsr, use_deblock;
+    float db_tc, db_beta;
+    struct bgra pic;        /* the generated picture after FSR */
+    const struct bgra *final; /* where the generated picture ended, after the last stage */
+    struct vt_plane ym, ym_prev; /* its luma, and the last one's */
+    int ym_valid;           /* the last frame made a generated picture too */
+    uint64_t fsr_cycles[FSR_STAGES + 1], fsr_runs;
+    int fine_stride;        /* FLOW_PIXEL: cells of the finest vectors, 8 (the field itself), 4 or 2 pixels */
+    struct fg_field fine;
+    struct fg_vec *fine_mem;
     float pick_bias;
     int next __attribute__((aligned(64)));
 };
@@ -49,5 +64,9 @@ void flow_land(struct flow *f);
 
 /* Between the two newest frames: 1 with the picture in f->out; 0 at a scene change, no picture; -1 when there are not yet two frames. */
 int flow_make(struct flow *f);
+
+/* After flow_make made a picture: FSR, then deblocking on the second team (run2 NULL: the first). The picture ends in *f->final. A frame that made none says so, and the next picture starts FSR afresh. */
+void flow_finish_generated(struct flow *f);
+void flow_no_generated(struct flow *f);
 
 #endif

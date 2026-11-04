@@ -133,10 +133,25 @@ struct sse {
     double gen, avg, rep;
     uint64_t n;
     double grad_gen, grad_truth, grad_avg;
+    double seam_gen, inner_gen, seam_truth, inner_truth;
 };
 
 static void sse_add(struct sse *q, const struct bgra *gen, const struct bgra *truth, const struct bgra *a, const struct bgra *b, int x0, int y0, int x1, int y1)
 {
+    /* Seams: the step in green across the 8 pixel grid against the step inside the blocks, in the generated picture and in the truth. */
+    for (int y = y0; y < y1; y++) {
+        const uint32_t *g = bgra_row(gen, y), *t = bgra_row(truth, y);
+        for (int x = x0 > 0 ? x0 : 1; x < x1; x++) {
+            const double dg = abs((int)((g[x] >> 8) & 255u) - (int)((g[x - 1] >> 8) & 255u)), dt = abs((int)((t[x] >> 8) & 255u) - (int)((t[x - 1] >> 8) & 255u));
+            if (x % 8 == 0) {
+                q->seam_gen += dg;
+                q->seam_truth += dt;
+            } else {
+                q->inner_gen += dg / 7.0;
+                q->inner_truth += dt / 7.0;
+            }
+        }
+    }
     /* Sharpness: the green channel's differences to the right and below, generated and the mean of the two against the truth. 1.000 is as sharp as what really happened. */
     for (int y = y0; y < y1 - 1; y++) {
         const uint32_t *g = bgra_row(gen, y) + x0, *t = bgra_row(truth, y) + x0, *pa = bgra_row(a, y) + x0, *pb = bgra_row(b, y) + x0;
@@ -210,7 +225,9 @@ int main(int argc, char **argv)
 {
     const char *scene_name = "window", *path = NULL, *form_name = "fused";
     int gap = 2, count = 12, tpc = 2, cores = 60, ref = 0;
-    int model_threads = 0, pick_r = -1, pick_h = -1, pick_bias = -1, enough = -1;
+    int model_threads = 0, pick_r = -1, pick_h = -1, pick_bias = -1, enough = -1, fine = 0, phase = -1;
+    int react = -1;
+    int stages = 0, tc = -1, beta = -1;
     const char *dump = NULL;
     int dump_x = 400, dump_y = 200;
     for (int i = 1; i < argc; i++) {
@@ -240,12 +257,24 @@ int main(int argc, char **argv)
             pick_h = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pick-bias") && i + 1 < argc)
             pick_bias = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--phase") && i + 1 < argc)
+            phase = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--fine") && i + 1 < argc)
+            fine = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--react") && i + 1 < argc)
+            react = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stages") && i + 1 < argc)
+            stages = atoi(argv[++i]) + 1;
+        else if (!strcmp(argv[i], "--tc") && i + 1 < argc)
+            tc = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--beta") && i + 1 < argc)
+            beta = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--enough") && i + 1 < argc)
             enough = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ref"))
             ref = 1;
         else {
-            fprintf(stderr, "usage: mf_replay [--scene still|window|pan|scroll|fast|pan7|scroll7|both53 | --file F.bgra] [--gap G] [--count N] [--tpc T] [--cores C] [--form fused|plain|pixel] [--ref] [--model THREADS] [--pick-r R] [--pick-h H] [--pick-bias Q6] [--enough Q6]\n");
+            fprintf(stderr, "usage: mf_replay [--scene still|window|pan|scroll|fast|pan7|scroll7|both53 | --file F.bgra] [--gap G] [--count N] [--tpc T] [--cores C] [--form fused|plain|pixel] [--ref] [--model THREADS] [--pick-r R] [--pick-h H] [--pick-bias Q6] [--enough Q6] [--fine S] [--phase P] [--stages MASK] [--tc T] [--beta B]\n");
             return 2;
         }
     }
@@ -290,7 +319,7 @@ int main(int argc, char **argv)
         ref = 1;
     } else if (mf_link_open(&l))
         return 1;
-    const struct mf_config cfg = {.w = (uint32_t)W, .h = (uint32_t)H, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .pick_r = (uint32_t)(pick_r + 1), .pick_h = (uint32_t)(pick_h + 1), .pick_bias = (uint32_t)(pick_bias + 1), .enough = (uint32_t)(enough + 1)};
+    const struct mf_config cfg = {.w = (uint32_t)W, .h = (uint32_t)H, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .pick_r = (uint32_t)(pick_r + 1), .pick_h = (uint32_t)(pick_h + 1), .pick_bias = (uint32_t)(pick_bias + 1), .enough = (uint32_t)(enough + 1), .fine = (uint32_t)fine, .phase = (uint32_t)(phase + 1), .stages = (uint32_t)stages, .tc = (uint32_t)(tc + 1), .beta = (uint32_t)(beta + 1), .alpha = (uint32_t)(react + 1)};
     if (!model_threads && mf_session_start(&l, &cfg, 30.0))
         return 1;
     if (!model_threads)
@@ -307,6 +336,10 @@ int main(int argc, char **argv)
         pool_n = model_threads ? model_threads : 8;
         if (flow_init(model, mem, W, H, form, pool_runner, &pool_n))
             return 1;
+        if (phase >= 0)
+            model->pick_phase = phase;
+        if (fine)
+            model->fine_stride = fine;
         if (pick_r >= 0)
             model->pick_r = pick_r;
         if (pick_h >= 0)
@@ -315,6 +348,16 @@ int main(int argc, char **argv)
             model->pick_bias = (float)pick_bias;
         if (enough >= 0)
             model->fg.enough = (float)enough;
+        if (react >= 0)
+            fsr_set_alpha_floor(model->fsr, (long double)react / 100.0L);
+        if (stages) {
+            model->use_fsr = ((stages - 1) & 1) != 0;
+            model->use_deblock = ((stages - 1) & 2) != 0;
+        }
+        if (tc >= 0)
+            model->db_tc = (float)tc;
+        if (beta >= 0)
+            model->db_beta = (float)beta;
     }
     void *tm, *hm, *am;
     if (posix_memalign(&tm, 64, bgra_bytes(W, H)) || posix_memalign(&hm, 64, bgra_bytes(W, H)) || posix_memalign(&am, 64, bgra_bytes(W, H)))
@@ -366,11 +409,18 @@ int main(int argc, char **argv)
             memcpy(bgra_base(flow_next_frame(model)), bgra_base(&in), bgra_bytes(W, H));
             flow_land(model);
             const int mm = i ? flow_make(model) : -1;
+            if (form == FLOW_PIXEL) {
+                if (mm == 1)
+                    flow_finish_generated(model);
+                else
+                    flow_no_generated(model);
+            }
+            const struct bgra *mout = form == FLOW_PIXEL && mm == 1 ? model->final : &model->out;
             if (model_threads) {
                 g.made = mm;
                 g.moved = model->moved;
                 if (mm == 1)
-                    memcpy(bgra_base(&out), bgra_base(&model->out), bgra_bytes(W, H));
+                    memcpy(bgra_base(&out), bgra_base(mout), bgra_bytes(W, H));
             }
             if (mm != g.made)
                 printf("frame %d: card made %d, model %d\n", i, g.made, mm);
@@ -378,16 +428,16 @@ int main(int argc, char **argv)
                 if (model->moved != g.moved)
                     moved_mismatch++;
                 for (int y = 0; y < H; y++) {
-                    const uint32_t *pa = bgra_row(&out, y), *pb = bgra_row(&model->out, y);
+                    const uint32_t *pa = bgra_row(&out, y), *pb = bgra_row(mout, y);
                     for (int x = 0; x < W; x++)
                         diff_px += pa[x] != pb[x];
                 }
                 compared_px += (uint64_t)W * (uint64_t)H;
                 /* The control: the same comparison on a copy with one byte flipped must see it. */
-                const uint32_t keep = bgra_row(&model->out, H / 2)[W / 2];
-                bgra_row(&model->out, H / 2)[W / 2] = keep ^ 1u;
-                control_caught += bgra_row(&out, H / 2)[W / 2] != bgra_row(&model->out, H / 2)[W / 2];
-                bgra_row(&model->out, H / 2)[W / 2] = keep;
+                const uint32_t keep = bgra_row(mout, H / 2)[W / 2];
+                bgra_row(mout, H / 2)[W / 2] = keep ^ 1u;
+                control_caught += bgra_row(&out, H / 2)[W / 2] != bgra_row(mout, H / 2)[W / 2];
+                bgra_row(mout, H / 2)[W / 2] = keep;
             }
         }
         if (g.made == 0)
@@ -404,7 +454,31 @@ int main(int argc, char **argv)
                 char name[256];
                 snprintf(name, sizeof name, "%s.ppm", dump);
                 FILE *fp = fopen(name, "wb");
+                if (dump_x < 0) {
+                    /* The whole picture's difference alone, four times over, and where it sits. */
+                    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+                    double edge = 0.0, inner = 0.0;
+                    for (int y = 0; y < H; y++)
+                        for (int x = 0; x < W; x++) {
+                            const uint32_t pg = bgra_row(&out, y)[x], pt = bgra_row(&truth, y)[x];
+                            uint8_t rgb[3];
+                            for (int q = 0; q < 3; q++) {
+                                const int e = (int)((pg >> (16 - 8 * q)) & 255u) - (int)((pt >> (16 - 8 * q)) & 255u), d = abs(e) * 4;
+                                rgb[q] = (uint8_t)(d > 255 ? 255 : d);
+                                if (x < 32 || x >= W - 32 || y < 32 || y >= H - 32)
+                                    edge += (double)(e * e);
+                                else
+                                    inner += (double)(e * e);
+                            }
+                            fwrite(rgb, 1, 3, fp);
+                        }
+                    printf("error: %.1f %% within 32 px of the picture's edge\n", 100.0 * edge / (edge + inner + 1e-9));
+                    fclose(fp);
+                    fp = NULL;
+                }
                 const int cw = 400, ch = 300;
+                if (!fp)
+                    goto dumped;
                 fprintf(fp, "P6\n%d %d\n255\n", 3 * cw, ch);
                 for (int y = 0; y < ch; y++)
                     for (int v = 0; v < 3; v++)
@@ -419,6 +493,7 @@ int main(int argc, char **argv)
                             fwrite(rgb, 1, 3, fp);
                         }
                 fclose(fp);
+            dumped:;
             }
             if (gap >= 2 && gap % 2 == 0) {
                 if (path)
@@ -450,7 +525,10 @@ int main(int argc, char **argv)
         printf("dB moving generated %.3f, mean of two %.3f, older again %.3f (%.1f %% of samples)\n", db(moving.gen, moving.n), db(moving.avg, moving.n), db(moving.rep, moving.n), 100.0 * (double)moving.n / (double)whole.n);
     if (moving.n)
         printf("sharpness moving, against the truth: generated %.3f, mean of two %.3f\n", moving.grad_gen / moving.grad_truth, moving.grad_avg / moving.grad_truth);
-    static const char *const names[MF_T_COUNT] = {"dma_in", "land", "pyr", "hist", "search", "filter", "up", "mid", "blend", "dma_out", "total"};
+    if (moving.n) {
+        printf("seams moving, 1.000 = the truth's: generated %.3f\n", (moving.seam_gen / moving.inner_gen) / (moving.seam_truth / moving.inner_truth));
+    }
+    static const char *const names[MF_T_COUNT] = {"dma_in", "land", "pyr", "hist", "search", "filter", "up", "mid", "blend", "fsr", "deblock", "dma_out", "total"};
     if (!model_threads) {
     printf("card us, median:");
     for (int t = 0; t < MF_T_COUNT; t++) {

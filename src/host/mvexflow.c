@@ -36,6 +36,7 @@ struct newframe {
 struct job {
     uint64_t seq;
     int in, out;
+    int mid_done; /* the generated picture has gone to the glass, or will not */
     uint64_t pts, t_in, t_pub;
     int late;
 };
@@ -230,6 +231,19 @@ static void show_real(struct app *a, int slot, uint64_t t_src)
 }
 
 /* Frames from the cast: to the card, or straight to the glass without one. */
+static int free_out(struct app *a)
+{
+    for (int i = 0; i < MF_SLOTS; i++) {
+        const int k = (a->out_turn + i) % MF_SLOTS;
+        if (!a->st_out[k]) {
+            a->out_turn = (k + 1) % MF_SLOTS;
+            return k;
+        }
+    }
+    return -1;
+}
+
+/* Frames from the cast: to the card, or straight to the glass without one. A real frame waits for its generated one, ahead of it on the glass. */
 static void take_new(struct app *a)
 {
     uint32_t head = atomic_load_explicit(&a->q_head, memory_order_relaxed);
@@ -249,20 +263,13 @@ static void take_new(struct app *a)
             a->must_skip_mid = 1;
             continue;
         }
-        int o = -1;
-        for (int i = 0; i < MF_SLOTS && o < 0; i++) {
-            const int k = (a->out_turn + i) % MF_SLOTS;
-            if (!a->st_out[k])
-                o = k;
-        }
-        const int want_mid = f.gap_ok && !a->must_skip_mid && o >= 0;
+        const int o = f.gap_ok && !a->must_skip_mid ? free_out(a) : -1;
+        const int want_mid = o >= 0;
         a->must_skip_mid = 0;
-        if (want_mid) {
-            a->out_turn = (o + 1) % MF_SLOTS;
+        if (want_mid)
             a->st_out[o] = OUT_CARD;
-        } else {
+        else
             a->s.nomid++;
-        }
         const uint64_t seq = ++a->pub;
         struct mf_msg *m = &a->l.ctl->msg[seq % MF_RING];
         m->seq = seq;
@@ -273,42 +280,55 @@ static void take_new(struct app *a)
         atomic_fetch_and(&a->st_in[f.slot], ~(uint32_t)IN_WRITING);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         a->l.ctl->frames_pub = seq;
-        /* A frame with no mid waits for nothing, when nothing is ahead of it: it reaches the glass now. `late` then says it has been shown. */
+        /* A frame with no mid waits for nothing, when nothing is ahead of it: after a pause the card may need 66 ms to bring its teams back, and a real frame does not go through them. `late` then says it has been shown. */
         const int now_shown = !want_mid && seq == a->done + 1;
         if (now_shown)
             show_real(a, f.slot, f.pts);
-        a->jobs[seq % MF_RING] = (struct job){seq, f.slot, want_mid ? o : -1, f.pts, f.t_in, mf_now_ns(), now_shown};
+        a->jobs[seq % MF_RING] = (struct job){.seq = seq, .in = f.slot, .out = want_mid ? o : -1, .mid_done = !want_mid, .pts = f.pts, .t_in = f.t_in, .t_pub = mf_now_ns(), .late = now_shown};
         a->s.sent++;
     }
 }
 
-/* What the card has finished: a generated picture, then the real frame it leads to, each taking one refresh by the fifo. */
+/* The generated picture goes out the moment it lands. Each picture takes one refresh by the fifo. */
+static void take_mid(struct app *a)
+{
+    const uint64_t have = a->l.ctl->mid_pub;
+    for (uint64_t s = a->done + 1; s <= a->pub && s <= have; s++) {
+        struct job *j = &a->jobs[s % MF_RING];
+        if (j->mid_done)
+            continue;
+        j->mid_done = 1;
+        a->st_out[j->out] &= ~(uint32_t)OUT_CARD;
+        a->s.made++;
+        const uint64_t depth = a->commits - a->shown_ok;
+        if (!j->late && depth < 3) {
+            a->st_out[j->out] |= OUT_SHOWN;
+            /* Half way between the two frames' instants. */
+            commit_buffer(a, a->buf_out[j->out], j->pts - a->interval_ns / 2, 1);
+        } else {
+            a->s.skip_g++;
+        }
+    }
+}
+
 static void take_done(struct app *a)
 {
+    take_mid(a);
     const uint64_t have = a->l.ctl->gen_pub;
     while (a->done < have) {
         const uint64_t seq = ++a->done;
         struct job *j = &a->jobs[seq % MF_RING];
         const struct mf_gen g = a->l.ctl->gen[seq % MF_RING];
-        const uint64_t depth = a->commits - a->shown_ok;
         a->s.card_sum += g.us[MF_T_TOTAL];
         a->s.card_n++;
         a->s.card_max = g.us[MF_T_TOTAL] > a->s.card_max ? g.us[MF_T_TOTAL] : a->s.card_max;
         a->s.moved_sum += g.moved;
         if (g.made == 0)
             a->s.scene++;
-        if (j->out >= 0) {
+        /* Asked for a mid that did not come: a scene change. */
+        if (!j->mid_done) {
+            j->mid_done = 1;
             a->st_out[j->out] &= ~(uint32_t)OUT_CARD;
-            if (g.made == 1) {
-                a->s.made++;
-                if (!j->late && depth < 3) {
-                    a->st_out[j->out] |= OUT_SHOWN;
-                    /* Half way between the two frames' instants. */
-                    commit_buffer(a, a->buf_out[j->out], j->pts - a->interval_ns / 2, 1);
-                } else {
-                    a->s.skip_g++;
-                }
-            }
         }
         atomic_fetch_and(&a->st_in[j->in], ~(uint32_t)IN_CARD);
         if (!j->late)
@@ -316,7 +336,7 @@ static void take_done(struct app *a)
     }
 }
 
-/* A frame the card has held too long reaches the glass without its mid, and the mid, should it come, is dropped. */
+/* A frame the card has held too long reaches the glass, and its generated picture, should it come, is dropped. */
 static void take_late(struct app *a)
 {
     const uint64_t now = mf_now_ns();
@@ -346,7 +366,7 @@ int main(int argc, char **argv)
 {
     static struct app a;
     uint32_t node = 0;
-    int tpc = 2, cores = 60, form = 2, seconds = 0, no_excl = 0;
+    int tpc = 2, cores = 60, form = 2, seconds = 0, no_excl = 0, stages = 0, fine = 0;
     const char *output = NULL;
     a.w_px = 1366;
     a.h_px = 768;
@@ -360,6 +380,10 @@ int main(int argc, char **argv)
             tpc = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cores") && i + 1 < argc)
             cores = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stages") && i + 1 < argc)
+            stages = atoi(argv[++i]) + 1;
+        else if (!strcmp(argv[i], "--fine") && i + 1 < argc)
+            fine = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--half"))
             form = 0;
         else if (!strcmp(argv[i], "--plain"))
@@ -371,7 +395,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-excl"))
             no_excl = 1;
         else {
-            fprintf(stderr, "usage: mvexflow --node N --output NAME [--tpc T] [--cores C] [--half] [--plain] [--pass] [--seconds S]\n");
+            fprintf(stderr, "usage: mvexflow --node N --output NAME [--tpc T] [--cores C] [--half] [--plain] [--stages MASK: 1 FSR, 2 deblocking] [--fine S] [--pass] [--seconds S]\n");
             return 2;
         }
     }
@@ -386,7 +410,7 @@ int main(int argc, char **argv)
         return 1;
     a.stride_b = plane_stride(a.w_px) * 4;
     if (!a.pass_only) {
-        const struct mf_config cfg = {.w = (uint32_t)a.w_px, .h = (uint32_t)a.h_px, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form};
+        const struct mf_config cfg = {.w = (uint32_t)a.w_px, .h = (uint32_t)a.h_px, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .stages = (uint32_t)stages, .fine = (uint32_t)fine};
         if (mf_session_start(&a.l, &cfg, 15.0))
             return 1;
         printf("card: %u cores, %u threads, tsc %u MHz, form %s\n", a.l.ctl->card_cores, a.l.ctl->card_threads, a.l.ctl->card_mhz, form == 2 ? "pixel" : form == 1 ? "plain" : "fused");

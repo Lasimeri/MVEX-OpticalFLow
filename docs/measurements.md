@@ -1,35 +1,79 @@
 # Measurements
 
-All on one Xeon Phi 7120A (61 cores, TSC 1238 MHz, Gen2 x8) and one desktop running KWin 6.8.2, 2026-11-04. Budget per generated frame: 33.45 ms.
+All on one Xeon Phi 7120A (61 cores, TSC 1238 MHz, Gen2 x8) and one desktop running KWin 6.8.2, 2026-11-04. Budget per source frame: 33.45 ms.
 
-Real footage below is a true 59.94 fps clip scaled to 1366x768, every second frame given, the frame between held out as truth: exactly a 30 to 60 doubling against what really happened. It is not in the repository.
+Real footage below is a true 59.94 fps clip scaled to 1366x768, every second frame given, the frame between held out as truth: exactly a 30 to 60 doubling against what really happened. It is not in the repository. Odd scenes move an odd number of pixels a given frame, the frame between lying on a half pixel, rendered by a 2x box.
 
-## Pixel for pixel, the default
+**dB**: tiles that moved, RGB, against the truth. **Sharp**: green differences right and below against the truth's, 1.000 = as sharp as what really happened. **Seams**: the step across the 8 pixel grid over the step inside blocks, against the truth's, 1.000 = no more seams than what really happened.
 
-Field at the picture's size, a vector per pixel, whole-pixel samples, 60 x 2, real footage, 20 frames. Median us: DMA in 1226, land 178, pyramid 257, histograms 211, search 4212, filter 966, upscale 603, mid 1219, picture 2307, DMA out 1215, **total 12,430, max 13,005**, of 33,450. Card = lane model: 0 of 19,932,672 pixels differ, control caught 19 of 19; 0 of 5,245,440 on each of window, scroll, pan7, both53, still. Audit: 0 illegal, 0 suspect, 778 KNC vector.
+## The chain, on the card
 
-Early-out on the finest level, rounds interleaved: threshold 0: 12.508, 12.527 ms; 1024 (the default): 12.425, 12.429 ms; 8192 (the port's): 10.924, 10.962 ms, with 29.218 dB and sharpness 0.977 against 29.152 and 0.978. The prediction from the level above is always even, so a loose threshold keeps faint detail on an even vector.
+Real footage, 20 frames, 60 x 2 first team, 60 x 2 second team, 240 threads on cpus 1 to 240, read on the card. Sharpness .869 against .867 for the mean of the two frames, whose motions here are mostly slow. Median us: DMA in 1225, land 186, pyramid 281, histograms 222, search 3072, filter 1056, upscale 639, mid 1159, pick 4115, FSR 15189, deblock 489, DMA out 1215. **Total 28844, max 31321.** Card = lane model: 0 of 19,932,672 pixels differ, control caught 19 of 19; 0 of 5,245,440 on each of window, scroll, pan7, still. Audit: 0 illegal, 0 suspect, 2346 KNC vector.
 
-dB on tiles that moved, and sharpness on them against the truth (differences in green, right and below; 1.000 = the truth's), half-size field then pixel for pixel. Odd scenes move an odd number of pixels a given frame, the frame between being rendered on the half pixel. Synthetic: 7 frames, host lane model; real footage: 19 frames, card.
+Three rounds, interleaved, total ms: whole chain 28.725, 28.635, 28.625 (max 29.197, 31.956, 29.070); frame-gen and deblocking without FSR 13.679, 13.633, 13.616 (max 14.1).
 
-| Frames | dB, half | dB, pixel | dB, mean of two | Sharp, half | Sharp, pixel | Sharp, mean |
-|---|---|---|---|---|---|---|
-| Real footage | 33.860 | 29.152 | 28.556 | .911 | **.978** | .867 |
-| Pan, 7 px a frame | 24.117 | 18.916 | 11.791 | .897 | **.999** | .911 |
-| Vertical, 7 px a frame | 25.312 | 19.858 | 11.952 | .937 | **.997** | .907 |
-| Both, 5 and 3 px a frame | 21.384 | 16.638 | 11.934 | .857 | **.998** | .905 |
-| Pan, 12 px a frame | 39.782 | 37.366 | 10.880 | .999 | .999 | .966 |
-| Scroll, 20 px a frame | 29.527 | 28.223 | 10.188 | .994 | .997 | .961 |
-| Window, 12 and 4 px a frame | 25.810 | **26.238** | 10.875 | 1.006 | 1.011 | .967 |
-| Fast box, 90 px a frame | 10.210 | **9.418** | **10.399** | 1.003 | 1.109 | .970 |
+FSR's stages, us a picture: clear 533, refine 335, finish 61, mark 357, input 121, hpass 641, diff 1012, mips 326, sc 206, react 1135, inst 2909, acc 6506, merge 135.
 
-Tried and thrown out on these numbers: vectors projected forward to the middle instant (at best +0 dB, -.009 to -.065 against none, on window, scroll, fast and real footage); credit in the pick for the texture a vector lines up (worse in every scene at every strength, sharpness up to 2.383: it invents edges).
+| Frames, on the card | dB | Mean of two | Older again | Seams |
+|---|---|---|---|---|
+| Real footage | 33.072 | 28.556 | 25.462 | 1.002 |
+| Window, 12 and 4 px a frame | 26.310 | 10.859 | 9.393 | 1.013 |
+| Scroll, 20 px a frame | 32.971 | 10.186 | 8.695 | 1.002 |
+| Pan, 7 px a frame | 24.178 | 11.794 | 10.406 | 0.998 |
 
-On the monitor, pixel for pixel, real use: glass 59 to 60 pictures/s when the content moves at the full rate, half generated; card 10.2 to 11.5 ms; cast stamp to scanout 40.7 to 58.6 ms in two groups, 36 s at 40 to 45 ms and 47 s at 55 to 60 ms of 88 s, against 37.9 to 47.8 at the half-size field: which refresh a picture catches depends on where the cast falls against the refresh, and at 12 ms a frame it now often misses one. In 64 s of use: cast 29.89/s, glass 59.61/s, 2 discards, card mean 11.36 ms, max 26.19 (the team coming back).
+## What each stage earns, real footage, host lane model, 12 frames
 
-## The team's stand-down
+| Chain | dB | Sharp | Seams | Real frame after it, against itself |
+|---|---|---|---|---|
+| Frame-gen alone | 32.678 | .876 | 1.014 | identical |
+| + deblock, tc 2, beta 12 (the default) | 32.665 | .873 | 1.001 | identical |
+| + deblock, tc 4, beta 24 | 32.636 | .870 | .988 | identical |
+| + deblock, tc 16, beta 96 | 32.233 | .859 | .943 | identical |
+| + FSR at AMD's weights, generated and real frames | 26.353 | .789 | 1.028 | 28.293 dB |
+| + FSR, new frame at least 75 %, generated and real frames | 32.937 | .868 | 1.002 | 44.510 dB |
+| + FSR, generated only, at least 75 % | 32.075 | .842 | 1.004 | identical |
+| + FSR, generated only, at least 90 % | 32.622 | .864 | 1.001 | identical |
+| **+ FSR, generated only, at least 95 % (the default)** | **32.706** | **.871** | **1.000** | identical |
+| + FSR, generated only, 100 %: no FSR at all | 32.737 | .876 | 1.000 | identical |
 
-One real session of 993 s, half-size field, on the viewer's own desktop: 27,823 frames, the team brought back 2 times, mean 25.6 ms, max 26.3 ms. A frame after a pause reaches the glass without waiting for it. In the same session: cast 29.89/s, 1.89/s of it identical, 27.97 generated/s, glass 55.92/s, 49 discards (one in 20 s), 1 generated frame skipped to take back the drift.
+FSR through both kinds of frame, at 75 %, is the one form in which it earns anything on real footage: +.272 dB. It costs 46.8 ms a frame, past the budget. On generated pictures alone it never helps real footage; on scenes it earns +.020 dB (scroll) and +.046 dB (window) at 95 %. At AMD's own weights the damage is misregistered history under one vector a 16 x 16 block: a still scene through it reads 99 dB, and a floor on the reactive value, up to 100 %, changed nothing (28.504 dB).
+
+## Forms of the picture, host lane model, dB, no FSR, no deblocking
+
+| Frames | Half-size field | Whole-pixel | Phase-correct (the default) |
+|---|---|---|---|
+| Real footage | **32.906** | 28.875 | 32.210 |
+| Pan, 7 px | 24.117 | 18.941 | **24.176** |
+| Vertical, 7 px | 25.312 | 19.938 | **25.513** |
+| Both, 5 and 3 px | 21.384 | 16.645 | **21.805** |
+| Scroll, 20 px | 29.527 | 32.883 | **32.896** |
+| Window | 25.810 | 26.238 | **26.245** |
+| Pan, 12 px | 39.782 | **57.713** | **57.713** |
+| Fast box, 90 px | **10.210** | 9.387 | 9.472 (mean of two 10.399) |
+
+Sharpness on real footage: half-size .909, whole-pixel .977, phase-correct .883. Whole-pixel is the sharpest and the furthest from the truth: at an odd motion it is half a pixel from the true middle. The half-size form stays closer to the truth on real footage, and loses everywhere a whole-pixel motion can be exact.
+
+The picture's edge: 100.0 % of the error on the pan scene and 88.9 % on scroll lay within 32 px of it, content arriving in one frame only. The frame that has the place, alone, took pan from 37.3 to 56.25 dB and scroll from 28.2 to 32.94.
+
+## Vector grid
+
+Real footage, on the card, whole chain: cells of 8 pixels (171 x 96 vectors, the default) 33.284 dB, 46.8 ms; cells of 4 pixels (342 x 192) 33.251 dB, 57.7 ms. On the host, no FSR, cells of 8 / 4 / 2: pan 56.252 / 55.603 / 55.993; scroll 32.940 / 32.965 / 32.893; window 26.257 / 25.898 / 25.814; real 28.657 / 28.479 / 28.480 whole-pixel.
+
+Tried and thrown out on these numbers: vectors projected forward to the middle instant (+.009 to +.065 dB without); credit in the pick for the texture a vector lines up (worse in every scene, sharpness to 2.383).
+
+## Fused against plain, half-size field
+
+Total ms, 59 x 2, 3 rounds: fused 6.49 to 6.51, plain 8.19 to 8.21; picture .94 against 2.33. Fused: 16 BGRA pixels a register, byte-wise means in 32-bit lanes. Plain: three Q6 F32 planes through the port's `fg_blend`. Fused gives up .007 dB.
+
+## On the monitor
+
+Test motion under the overlay (`tools/moving.c`), the whole chain, 13 s: cast 29.92/s, generated 29.92/s, glass 59.54/s, 771 of 774 pictures one refresh after the last, 3 two refreshes, 2 discards, 0 late, 0 skipped; card mean 29.04, max 34.70 ms; cast stamp to scanout 85 to 90 ms. In real use 71.5 ms.
+
+Frame-gen and deblocking without FSR, real use, 216 s: glass 58.78/s, 6 discards, card mean 23.84 ms (a build with a needless copy since removed; 13.6 ms now), 45 to 65 ms.
+
+Frame-gen alone, half-size field: 37.9 to 47.8 ms.
+
+The team's stand-down: a real session of 993 s, 27,823 frames, one team back 2 times at 25.6 ms; both teams 66 ms. A frame after a pause reaches the glass without waiting for them.
 
 ## Design probes (`tools/probe.c`)
 
@@ -39,56 +83,13 @@ One real session of 993 s, half-size field, on the viewer's own desktop: 27,823 
 | `excludeFromCapture` on a layer surface | 6 of 93,368,832 pixels still match (chance) |
 | Cast with `maxFramerate` = refresh / 2 | BGRx 1366x768, 29.895 to 29.903 /s; x byte always 255 |
 
-## Card against host lane model
+## Threads and pollers
 
-`mf_replay --ref`: 0 of 7,343,616 pixels differ on each of window, pan, scroll, fast, still (7 generated frames each), 0 of 19,932,672 on real footage (19 frames), control caught every frame. Audit: 0 illegal, 0 suspect, 705 KNC vector.
-
-## Picture, half-size field
-
-dB on tiles that moved, RGB, against the truth:
-
-| Frames | Generated | Mean of two | Older again | Moved blocks |
-|---|---|---|---|---|
-| Real footage | 33.860 | 28.556 | 25.462 | 64.2 % |
-| Synthetic pan | 39.782 | 10.880 | 9.490 | 99.8 % |
-| Synthetic scroll | 29.527 | 10.188 | 8.695 | 58.1 % |
-| Synthetic window | 25.810 | 10.875 | 9.406 | 16.3 % |
-| Synthetic fast box, 90 px a frame | **10.210** | **10.399** | 8.500 | 2.0 %: **generated loses to the mean** |
-
-These synthetic scenes move even distances only, which is why this table never showed the half-size field's flaw.
-
-## Time, half-size field
-
-Half-size field, real footage, median us, 60 cores x 2: DMA in 1226, land 179, pyramid 245, histograms 212, search 1449, filter 426, upscale 267, mid 283, picture 931, DMA out 1215, total 6464, max 6800.
-
-| Threads | Fused total ms | Plain total ms | Fused picture | Plain picture |
-|---|---|---|---|---|
-| 59 x 2 | 6.49 to 6.51 | 8.19 to 8.21 | .94 | 2.33 |
-| 59 x 3 | 6.53 to 6.56 | 7.86 to 7.94 | .78 to .79 | 1.82 to 1.83 |
-| 59 x 4 | 6.94 to 6.97 | 8.16 | .70 | 1.63 |
-
-3 rounds, interleaved. Fused: 16 BGRA pixels a register, byte-wise means in 32-bit lanes. Plain: three Q6 F32 planes through the port's `fg_blend`. Fused gives up .007 dB on moving tiles (33.860 against 33.867).
-
-| Threads, pollers | Total ms, rounds interleaved |
-|---|---|
-| 60 x 2, pollers on 238, 239 | 6.428 6.449 6.442 6.468 |
-| 59 x 2, pollers on 238, 239 | 6.482 6.484 6.450 6.468 |
-| 60 x 2, pollers moved to 241, 242 | 6.476 6.472 6.487 |
-| 60 x 2, pollers on 238, 239 (same run) | 6.490 6.463 6.464 |
-
-Placement read on the card during a session: 120 tasks, `Cpus_allowed` 1 2 5 6 ... 233 234 237 238. Moving the pollers gives no measurable gain while they are idle.
-
-## On the monitor
-
-Test motion under the overlay (`tools/moving.c`), 12 s, 59 x 2: glass 59 to 60 pictures/s, half generated; 58 to 60 of 60 pictures one refresh after the last; 3 discards; card 5.9 ms; cast stamp to scanout 41.2 to 41.5 ms; `kwin_wayland` 17.4 %, `mvexflow` 2.0 % of a core.
-
-Real footage in mpv under the overlay, 15 s: glass 59 to 60 pictures/s, 0 discards during playback, card 6.2 to 6.45 ms, 47.4 to 47.8 ms. One second fell to 10 pictures/s with a 953 ms gap while the cast kept delivering identical frames: the player stalled.
-
-A still desktop: 1 frame/s or less reached the card and the glass.
+60 x 2 against 59 x 2, half-size field, 4 rounds: 6.428 to 6.468 ms against 6.450 to 6.484. Pollers moved against left at boot, 3 rounds: 6.476 6.472 6.487 against 6.490 6.463 6.464: no measurable gain while they are idle. The second team waiting at 8 cycles a look slowed the first by about 15 %; at 1024 search is back at 3.07 ms from 3.54.
 
 ## Cost to the rest of the desktop
 
-`scripts/pace_test.sh`, 20 s, 2 rounds interleaved, test motion in all passes, an invisible probe on each monitor:
+`scripts/pace_test.sh`, half-size field, 20 s, 2 rounds interleaved, test motion in all passes, an invisible probe on each monitor:
 
 | | Main monitor, 120 Hz, missed | This monitor, missed | `kwin_wayland`, % of a core |
 |---|---|---|---|
@@ -99,4 +100,4 @@ A still desktop: 1 frame/s or less reached the card and the glass.
 
 ## The viewer
 
-"Seems like it's working! Least for the test pattern." Then the order that made the picture pixel for pixel. Whether it now looks right: to be judged by the same eye.
+"Seems like it's working! Least for the test pattern." The chain since: to be judged by the same eye.

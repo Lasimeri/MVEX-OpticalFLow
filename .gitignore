@@ -13,3 +13,4 @@ modules.order
 Module.symvers
 .cache/
 compile_commands.json
+third_party/fsr3/

@@ -4,6 +4,7 @@
  * Started detached by scripts/mvexflow.sh; stopped by the quit word (host: mf_quit). */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,6 +90,90 @@ static int select_threads(const struct topo *t, int cores, int tpc, int *cpus, i
     return taken == cores ? n : -1;
 }
 
+/* The second set: threads tpc .. 2 tpc - 1 of every core with no poller on it. With the pollers moved that is all 60 cores, 120 threads; left where they boot, 59 cores, 118. Returns the count. */
+static int select_second(const struct topo *t, int tpc, int *cpus, int *core_of)
+{
+    int n = 0, taken = 0;
+    for (int c = 0; c < t->ncores; c++) {
+        const struct topo_core *k = &t->core[c];
+        if (k->reserved || k->ncpus < 2 * tpc)
+            continue;
+        for (int i = 0; i < tpc; i++) {
+            cpus[n] = k->cpu[tpc + i];
+            core_of[n] = taken;
+            n++;
+        }
+        taken++;
+    }
+    return n;
+}
+
+/* The second team needs a first thread of its own, on its own CPU: the session's thread hands it each round and waits, giving its issue slots away. */
+struct second {
+    pthread_t th;
+    const int *cpus, *core_of;
+    int n;
+    flow_fn fn;
+    void *arg;
+    uint32_t go __attribute__((aligned(64)));
+    uint32_t done __attribute__((aligned(64)));
+    int ready, failed, stop;
+};
+
+static void *second_main(void *p)
+{
+    struct second *s = p;
+    struct team *t = team_create(s->cpus, s->core_of, s->n);
+    if (!t) {
+        __atomic_store_n(&s->failed, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    team_set_spin(t, 1024u); /* idle most of a frame, beside the first team on the same cores */
+    __atomic_store_n(&s->ready, 1, __ATOMIC_RELEASE);
+    uint32_t seen = 0;
+    for (;;) {
+        uint32_t g;
+        while ((g = __atomic_load_n(&s->go, __ATOMIC_ACQUIRE)) == seen)
+            vt_delay(1024u);
+        seen = g;
+        if (__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE))
+            break;
+        team_run(t, s->fn, s->arg);
+        __atomic_store_n(&s->done, g, __ATOMIC_RELEASE);
+    }
+    team_destroy(t);
+    return NULL;
+}
+
+static int second_start(struct second *s)
+{
+    s->go = s->done = 0;
+    s->ready = s->failed = s->stop = 0;
+    if (pthread_create(&s->th, NULL, second_main, s))
+        return -1;
+    while (!__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE))
+        if (__atomic_load_n(&s->failed, __ATOMIC_ACQUIRE))
+            return -1;
+    return 0;
+}
+
+static void second_stop(struct second *s)
+{
+    __atomic_store_n(&s->stop, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s->go, 1, __ATOMIC_ACQ_REL);
+    pthread_join(s->th, NULL);
+}
+
+static void second_runner(void *ctx, flow_fn fn, void *arg)
+{
+    struct second *s = ctx;
+    s->fn = fn;
+    s->arg = arg;
+    const uint32_t g = __atomic_add_fetch(&s->go, 1, __ATOMIC_ACQ_REL);
+    while (__atomic_load_n(&s->done, __ATOMIC_ACQUIRE) != g)
+        vt_delay(16u);
+}
+
 static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo, uint64_t session)
 {
     struct mf_config cfg;
@@ -105,6 +190,12 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         fprintf(stderr, "mvexflowd: no %d cores x %u threads\n", cores, cfg.tpc);
         return -1;
     }
+    int cpus2[TOPO_MAX_CPUS], core_of2[TOPO_MAX_CPUS];
+    const int n2 = (int)cfg.form == FLOW_PIXEL ? select_second(topo, (int)cfg.tpc, cpus2, core_of2) : 0;
+    static struct second second;
+    second.cpus = cpus2;
+    second.core_of = core_of2;
+    second.n = n2;
     struct arena a;
     if (arena_open(&a, flow_bytes(w, h, (int)cfg.form) + 2u * ARENA_PAGE))
         return -1;
@@ -116,19 +207,43 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         fprintf(stderr, "mvexflowd: session memory or team\n");
         return -1;
     }
+    int have_second = 0;
+    if (n2 > 0) {
+        if (second_start(&second)) {
+            fprintf(stderr, "mvexflowd: no second team\n");
+            return -1;
+        }
+        have_second = 1;
+        f.run2 = second_runner;
+        f.run2_ctx = &second;
+    }
+    if (cfg.stages) {
+        f.use_fsr = ((cfg.stages - 1) & 1u) != 0;
+        f.use_deblock = ((cfg.stages - 1) & 2u) != 0;
+    }
+    if (cfg.alpha)
+        fsr_set_alpha_floor(f.fsr, (long double)(cfg.alpha - 1) / 100.0L);
+    if (cfg.tc)
+        f.db_tc = (float)(cfg.tc - 1);
+    if (cfg.beta)
+        f.db_beta = (float)(cfg.beta - 1);
     if (cfg.pick_r)
         f.pick_r = (int)cfg.pick_r - 1;
     if (cfg.pick_h)
         f.pick_h = (int)cfg.pick_h - 1;
     if (cfg.pick_bias)
         f.pick_bias = (float)(cfg.pick_bias - 1);
+    if (cfg.phase)
+        f.pick_phase = (int)cfg.phase - 1;
+    if (cfg.fine)
+        f.fine_stride = (int)cfg.fine;
     if (cfg.enough)
         f.fg.enough = (float)(cfg.enough - 1);
     const uint64_t khz = measure_khz();
     ctl->card_threads = (uint32_t)n;
     ctl->card_cores = (uint32_t)cores;
     ctl->card_mhz = (uint32_t)(khz / 1000u);
-    printf("mvexflowd: session %llu: %d x %d, %d cores, %d threads, form %u, %d levels, tsc %llu kHz (card)\n", (unsigned long long)session, w, h, cores, n, cfg.form, f.levels, (unsigned long long)khz);
+    printf("mvexflowd: session %llu: %d x %d, %d cores, %d threads, second team %d threads, form %u, %d levels, tsc %llu kHz (card)\n", (unsigned long long)session, w, h, cores, n, n2, cfg.form, f.levels, (unsigned long long)khz);
     const uint64_t part = dma->region_addr + MF_PART_OFFSET;
     const uint64_t frame_bytes = bgra_bytes(w, h);
     /* A picture goes back whole rows, padding columns included, in the slot's own layout. */
@@ -145,6 +260,10 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
                 team_destroy(team);
                 team = NULL;
                 f.run_ctx = NULL;
+                if (have_second) {
+                    second_stop(&second);
+                    have_second = 0;
+                }
             }
             nap();
             continue;
@@ -158,6 +277,8 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
                 break;
             }
             f.run_ctx = team;
+            if (n2 > 0 && !second_start(&second))
+                have_second = 1;
             const uint64_t took = vt_tsc() - c0;
             ups++;
             up_cycles += took;
@@ -179,16 +300,27 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         int made = -1;
         if (!(flags & MF_NO_MID))
             made = flow_make(&f);
-        const uint64_t t2 = vt_tsc();
+
         last = 0;
+        uint64_t dma_out = 0;
+        const int chain = (int)cfg.form == FLOW_PIXEL;
         if (made == 1) {
-            last = copy_range(dma, &a, (char *)bgra_base(&f.out) + out_skip, part + mf_out_offset(out_slot) + out_skip, out_bytes, 0);
+            if (chain)
+                flow_finish_generated(&f);
+            const uint64_t d0 = vt_tsc();
+            last = copy_range(dma, &a, (char *)bgra_base(chain ? f.final : &f.out) + out_skip, part + mf_out_offset(out_slot) + out_skip, out_bytes, 0);
+            /* The word that says so travels behind the picture on the same channel. */
+            if (last)
+                last = vt_dma_copy(dma, arena_phys(&a, gm), part + offsetof(struct mf_ctl, mid_scratch), 64u, part + offsetof(struct mf_ctl, mid_pub), seen);
             if (!last || vt_dma_wait(dma, last, 5.0)) {
                 fprintf(stderr, "mvexflowd: picture DMA failed\n");
                 rc = -1;
                 break;
             }
+            dma_out += vt_tsc() - d0;
         }
+        if (chain && made != 1)
+            flow_no_generated(&f);
         const uint64_t t3 = vt_tsc();
 #define US(c) ((uint32_t)((c) * 1000ull / khz))
         memset(gm, 0, sizeof *gm);
@@ -205,7 +337,9 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         gm->us[MF_T_UP] = US(f.cycles[FLOW_UP]);
         gm->us[MF_T_MID] = US(f.cycles[FLOW_MID]);
         gm->us[MF_T_BLEND] = US(f.cycles[FLOW_BLEND]);
-        gm->us[MF_T_DMA_OUT] = US(t3 - t2);
+        gm->us[MF_T_FSR] = US(f.cycles[FLOW_FSR]);
+        gm->us[MF_T_DEBLOCK] = US(f.cycles[FLOW_DEBLOCK]);
+        gm->us[MF_T_DMA_OUT] = US(dma_out);
         gm->us[MF_T_TOTAL] = US(t3 - t0);
 #undef US
         last = vt_dma_copy(dma, arena_phys(&a, gm), part + offsetof(struct mf_ctl, gen) + (seen % MF_RING) * sizeof(struct mf_gen), sizeof *gm, part + offsetof(struct mf_ctl, gen_pub), seen);
@@ -217,6 +351,15 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         last_frame = vt_tsc();
     }
     printf("mvexflowd: session %llu served %llu frames; team brought back %llu times, us mean %llu max %llu (card)\n", (unsigned long long)session, (unsigned long long)seen, (unsigned long long)ups, (unsigned long long)(ups ? up_cycles * 1000ull / khz / ups : 0), (unsigned long long)(up_max * 1000ull / khz));
+    if (f.fsr_runs) {
+        static const char *const names[FSR_STAGES + 1] = {"clear", "refine", "finish", "mark", "input", "hpass", "diff", "mip0", "mip1", "mip2", "sc", "react", "inst", "acc", "sharpen", "merge"};
+        printf("mvexflowd: FSR us a picture over %llu:", (unsigned long long)f.fsr_runs);
+        for (int s = 0; s <= FSR_STAGES; s++)
+            printf(" %s %llu", names[s], (unsigned long long)(f.fsr_cycles[s] * 1000ull / khz / f.fsr_runs));
+        printf(" (card)\n");
+    }
+    if (have_second)
+        second_stop(&second);
     if (team)
         team_destroy(team);
     arena_close(&a);

@@ -40,7 +40,7 @@ out/card/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(KNC_CLANG) $(CARD_CFLAGS) -c $< -o $@
 
-KERN := kern/framegen kern/img_ref kern/img_vx kern/bgra kern/flow
+KERN := kern/framegen kern/fsr3 kern/deblock kern/img_ref kern/img_vx kern/bgra kern/flow
 HOST_WIN := host/wlp host/pwc
 
 out/host/probe: out/host/tools/probe.o $(HOST_WIN:%=out/host/%.o) $(PROTO_O)

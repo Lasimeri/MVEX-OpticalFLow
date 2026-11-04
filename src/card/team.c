@@ -39,6 +39,7 @@ struct team {
     struct tcore *core;
     struct tthread *thr;
     uint32_t round;
+    uint32_t spin; /* cycles a waiting thread gives away between looks */
     int count LINE; /* team_barrier: arrivals */
     int sense LINE; /* team_barrier: release */
 };
@@ -71,10 +72,10 @@ static inline void leader_finish(struct team *t, struct tcore *c, uint32_t round
 {
     const uint32_t want = bytes_of(round, c->done_mask);
     while ((__atomic_load_n(&c->done, __ATOMIC_ACQUIRE) & c->done_mask) != want)
-        team_delay(SPIN_CYCLES);
+        team_delay(__atomic_load_n(&t->spin, __ATOMIC_RELAXED));
     for (int i = 0; i < c->nchildren; i++)
         while (__atomic_load_n(&t->core[c->child[i]].up, __ATOMIC_ACQUIRE) != round)
-            team_delay(SPIN_CYCLES);
+            team_delay(__atomic_load_n(&t->spin, __ATOMIC_RELAXED));
     __atomic_store_n(&c->up, round, __ATOMIC_RELEASE);
 }
 
@@ -89,7 +90,7 @@ static void *worker_main(void *p)
     for (;;) {
         uint32_t g;
         while ((g = __atomic_load_n(&c->go, __ATOMIC_ACQUIRE)) == seen)
-            team_delay(SPIN_CYCLES);
+            team_delay(__atomic_load_n(&t->spin, __ATOMIC_RELAXED));
         seen = g;
         const team_fn fn = c->fn;
         void *const arg = c->arg;
@@ -110,7 +111,7 @@ struct team *team_create(const int *cpus, const int *core_of, int n)
     struct team *t;
     if (n < 1 || posix_memalign((void **)&t, 64, sizeof *t))
         return NULL;
-    *t = (struct team){.n = n, .ncores = core_of[n - 1] + 1};
+    *t = (struct team){.n = n, .ncores = core_of[n - 1] + 1, .spin = SPIN_CYCLES};
     if (posix_memalign((void **)&t->core, 64, sizeof(struct tcore) * (size_t)t->ncores) ||
         posix_memalign((void **)&t->thr, 64, sizeof(struct tthread) * (size_t)n))
         return NULL;
@@ -160,7 +161,7 @@ void team_barrier(struct team *t)
         __atomic_store_n(&t->sense, !s, __ATOMIC_RELEASE);
     } else {
         while (__atomic_load_n(&t->sense, __ATOMIC_ACQUIRE) == s)
-            team_delay(SPIN_CYCLES);
+            team_delay(__atomic_load_n(&t->spin, __ATOMIC_RELAXED));
     }
 }
 
@@ -178,3 +179,5 @@ void team_destroy(struct team *t)
     free(t->thr);
     free(t);
 }
+
+void team_set_spin(struct team *t, unsigned cycles) { __atomic_store_n(&t->spin, cycles, __ATOMIC_RELAXED); }

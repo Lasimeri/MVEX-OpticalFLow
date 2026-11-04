@@ -1,4 +1,4 @@
-# Copied unchanged from Intel-Phi-VisionTrack, commit ac165e8. sha256 of the source at the moment of the copy. framegen.c and framegen.h have since changed here by one setting: docs/INDEX.md.
+# Copied unchanged from Intel-Phi-VisionTrack, commit ac165e8. sha256 of the source at the moment of the copy. framegen, fsr3 and team have since changed here: docs/INDEX.md.
 387b97ff003c32f86b663d4eaca5ad91ef349c076f71ab024fffef7f8d9e3fe7  src/kern/framegen.c
 a7231a10ee179e091e91b8ebf6c62d009b1522c9f6c51ee1e386b4c1e94345d1  src/kern/framegen.h
 07c9b1b671d18cfcddf07dcd1c168e64ccc2c69995f3c9e609da8da5b67fa493  src/kern/plane.h
@@ -19,3 +19,5 @@ d6f5ca9f5978667591d62111591ccdb0b3af7c87064ae3dbbb28efced7434e3b  LICENSES/Fidel
 bf9639213ff1c26fde1b1d417da7bb0d2ef0c5c9542c1783101b8437bd5ea3f1  third_party/opticalflow/ffx_opticalflow.h
 1f790284877048d8beb28a4160e1df11642d5dcf90544776899e6df97b2f17a9  scripts/audit.sh
 3d90a6830f0a078dd5cf05b59d91d0a7f9dcb59b5f44f6d0fae4fb740cba5997  scripts/compdb.sh
+f8f92ece2a7417301b9b7b29be75c5891a7f1bbf94b0cc9453aad05d1e621116  src/kern/fsr3.c
+a25c408f71baa4cf9367768a005486775e280827ba644fd985028ea6168fb419  src/kern/fsr3.h

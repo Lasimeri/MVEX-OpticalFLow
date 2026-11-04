@@ -24,7 +24,7 @@ _Static_assert(MF_OUT_OFFSET + MF_SLOTS * MF_SLOT_BYTES <= MF_PART_BYTES, "the s
 #define MF_RING 16 /* frames in flight at most, far above what can be */
 
 enum mf_flags { MF_NO_MID = 1 };
-enum mf_times { MF_T_DMA_IN, MF_T_LAND, MF_T_PYR, MF_T_HIST, MF_T_SEARCH, MF_T_FILTER, MF_T_UP, MF_T_MID, MF_T_BLEND, MF_T_DMA_OUT, MF_T_TOTAL, MF_T_COUNT };
+enum mf_times { MF_T_DMA_IN, MF_T_LAND, MF_T_PYR, MF_T_HIST, MF_T_SEARCH, MF_T_FILTER, MF_T_UP, MF_T_MID, MF_T_BLEND, MF_T_FSR, MF_T_DEBLOCK, MF_T_DMA_OUT, MF_T_TOTAL, MF_T_COUNT };
 
 struct mf_config {
     uint64_t format;
@@ -32,7 +32,11 @@ struct mf_config {
     uint32_t cores, tpc; /* 0 cores: the 60 x 2 of the order of 11-04: 59 usable cores and the free threads of the poller core */
     uint32_t form;       /* enum flow_form */
     uint32_t pick_r, pick_h, pick_bias, enough; /* FLOW_PIXEL, each plus 1, 0 = default: the window, the bias and the early-out in Q6 counts */
-    uint32_t pad[5];
+    uint32_t fine;       /* FLOW_PIXEL: cell of the finest vectors in pixels, 0 = default */
+    uint32_t phase;      /* FLOW_PIXEL: 1 + 1 the middle of two pairs at an odd motion, 1 the first pair alone, 0 = default */
+    uint32_t stages;     /* 0 = both; else 1 + (1 FSR | 2 deblocking) */
+    uint32_t tc, beta;   /* deblocking, each plus 1, 0 = default */
+    uint32_t alpha;      /* FSR: the least of a pixel that is the new frame, percent plus 1, 0 = default */
 };
 
 /* Host to card: a frame is ready. */
@@ -51,8 +55,9 @@ struct mf_gen {
     int32_t made;    /* 1: the mid frame between the last frame and this one is in out_slot; 0: scene change; -1: none asked */
     uint32_t moved;  /* blocks with a nonzero mid vector */
     uint32_t us[MF_T_COUNT];
+    uint32_t pad[14];
 };
-_Static_assert(sizeof(struct mf_gen) == 64, "whole line for the DMA");
+_Static_assert(sizeof(struct mf_gen) == 128, "whole lines for the DMA");
 _Static_assert(sizeof(struct mf_msg) == 64, "whole line");
 
 struct mf_ctl {
@@ -68,7 +73,9 @@ struct mf_ctl {
     /* Host to card. */
     volatile uint64_t frames_pub __attribute__((aligned(64)));
     struct mf_msg msg[MF_RING];
-    /* Card to host, by DMA. */
+    /* Card to host, by DMA: the generated picture of frame mid_pub is in its slot; frame gen_pub is done. */
+    volatile uint64_t mid_pub __attribute__((aligned(64)));
+    uint64_t mid_scratch[8] __attribute__((aligned(64)));
     volatile uint64_t gen_pub __attribute__((aligned(64)));
     uint64_t pad_gen[7];
     struct mf_gen gen[MF_RING];

@@ -209,8 +209,10 @@ void bgra_merge_vx(const struct bgra *out, const struct vt_plane src[3], int y0,
 
 /* ---- the picture at full resolution, a vector per pixel ---- */
 
-#define PICK_MAX 8     /* vectors a tile weighs */
+#define PICK_MAX 10    /* vectors a tile weighs */
 #define PICK_RADIUS 3  /* rows of the window each side, at most */
+#define FINE_FAVOUR_ZERO 64.0f /* Q6 counts over 8 x 8: one grey level over the window, for still things */
+#define FINE_ENOUGH 256.0f     /* Q6 counts over 8 x 8: under this a cell needs no step around its best */
 
 static inline const float *luma_at(const struct vt_plane *p, int x, int y)
 {
@@ -218,43 +220,186 @@ static inline const float *luma_at(const struct vt_plane *p, int x, int y)
     return plane_row(p, clampi(y, -VT_PAD_Y, p->h + VT_PAD_Y - 1)) + clampi(x, -VT_PAD_X, last);
 }
 
-/* A tile's own four blocks first, then the ring around them: when more vectors are about than a tile weighs, the nearest stay. */
-static const signed char PICK_ORDER[16][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}, {-1, 0}, {-1, 1}, {2, 0}, {2, 1}, {0, -1}, {1, -1}, {0, 2}, {1, 2}, {-1, -1}, {2, -1}, {-1, 2}, {2, 2}};
+/* Which of the 16 lanes from column x of row y lie inside the picture, as a mask. A load whose start was clamped to the padding has no lane inside, so the clamp cannot misplace one. */
+static inline unsigned inside(int x, int y, int w, int h)
+{
+    if (y < 0 || y >= h)
+        return 0u;
+    const int lo = x < 0 ? -x : 0, hi = w - x < 16 ? w - x : 16;
+    return hi <= lo ? 0u : ((1u << hi) - 1u) & ~((1u << lo) - 1u);
+}
 
-void bgra_pick_vx(const struct fg_field *mid, const struct fg_field *parent, const struct vt_plane *ya, const struct vt_plane *yb, const struct bgra *a, const struct bgra *b, const struct bgra *out, int r, int h, float bias, int t0, int t1)
+/* A vector decoded: a at x + ax, y + ay; b at x - bx, y - by. clip: some sample of this tile falls outside the picture for one of the frames. */
+struct pick_v {
+    int ax, ay, bx, by, clip;
+    int odd_x, odd_y; /* the total motion is odd this way: the true middle lies between two whole pixels */
+};
+
+static inline void pick_decode(struct pick_v *c, uint32_t w)
+{
+    struct fg_vec v;
+    memcpy(&v, &w, sizeof v);
+    c->ax = v.x >> 1;
+    c->ay = v.y >> 1;
+    c->bx = v.x - c->ax;
+    c->by = v.y - c->ay;
+    c->clip = 0;
+    c->odd_x = v.x & 1;
+    c->odd_y = v.y & 1;
+}
+
+static inline void pick_clip(struct pick_v *c, int x, int y0, int y1, int r, int w, int h)
+{
+    c->clip = x - 16 + c->ax < 0 || x + 32 + c->ax > w || y0 - r + c->ay < 0 || y1 + r + c->ay > h || x - 16 - c->bx < 0 || x + 32 - c->bx > w || y0 - r - c->by < 0 || y1 + r - c->by > h;
+}
+
+/* The picture's 16 pixels for a vector. Where only one frame has the place, as what scrolls in at the picture's edge has, that frame alone: exact, where the mean would take half of it from the padding. */
+static inline vxu pick_pair(const struct bgra *a, const struct bgra *b, const struct bgra *out, int x, int y, const struct pick_v *c)
+{
+    const vxu pa = vxu_loadu(row_at(a, x + c->ax, y + c->ay)), pb = vxu_loadu(row_at(b, x - c->bx, y - c->by));
+    vxu m = mean_bytes(pa, pb);
+    if (c->clip) {
+        const unsigned ka = inside(x + c->ax, y + c->ay, out->w, out->h), kb = inside(x - c->bx, y - c->by, out->w, out->h);
+        m = vxu_blend((vxk)(kb & ~ka), m, pb);
+        m = vxu_blend((vxk)(ka & ~kb), m, pa);
+    }
+    return m;
+}
+
+/* The mean rounded down, for the second of two means: one up, one down, and the rounding does not creep. */
+static inline vxu mean_floor(vxu a, vxu b) { return vxu_add(vxu_and(a, b), vxu_and_s(vxu_srl(vxu_xor(a, b), 1), &M_7F)); }
+
+/* The picture along a vector. A pair a(x + ax), b(x - bx) is one place of the scene, but at an odd total motion it lies half a pixel from the true middle, and the next pair over half a pixel the other side. The mean of the two pairs sits on the true middle: the
+ * picture that really was there, as nearly as whole pixels of two frames can give it. phase 0: the first pair alone. */
+static inline vxu pick_px(const struct bgra *a, const struct bgra *b, const struct bgra *out, int x, int y, const struct pick_v *c, int phase)
+{
+    const vxu m = pick_pair(a, b, out, x, y, c);
+    if (!phase || !(c->odd_x | c->odd_y))
+        return m;
+    if (!c->odd_y)
+        return mean_floor(m, pick_pair(a, b, out, x + 1, y, c));
+    if (!c->odd_x)
+        return mean_floor(m, pick_pair(a, b, out, x, y + 1, c));
+    return mean_floor(vxu_sub(vxu_or(m, pick_pair(a, b, out, x + 1, y + 1, c)), vxu_and_s(vxu_srl(vxu_xor(m, pick_pair(a, b, out, x + 1, y + 1, c)), 1), &M_7F)), mean_bytes(pick_pair(a, b, out, x + 1, y, c), pick_pair(a, b, out, x, y + 1, c)));
+}
+
+/* The two frames' disagreement along a vector over 16 columns. Where one frame has no such place there is nothing to disagree with. */
+static inline vxf pick_d(const struct vt_plane *ya, const struct vt_plane *yb, int x, int y, const struct pick_v *c, int w, int h)
+{
+    const vxf d = vx_abs(vx_sub(vx_loadu(luma_at(ya, x + c->ax, y + c->ay)), vx_loadu(luma_at(yb, x - c->bx, y - c->by))), &ABS_F);
+    if (!c->clip)
+        return d;
+    return vx_blend((vxk)(inside(x + c->ax, y + c->ay, w, h) & inside(x - c->bx, y - c->by, w, h)), vx_zero(), d);
+}
+
+/* How well the two frames agree over 8 x 8 at the middle instant along v. */
+static inline float fine_sad(const struct vt_plane *ya, const struct vt_plane *yb, int x, int y, int vx_, int vy_)
+{
+    static const unsigned short EIGHT = 0x00ff;
+    const int ax = vx_ >> 1, ay = vy_ >> 1, bx = vx_ - ax, by = vy_ - ay;
+    const vxf zero = vx_zero();
+    vxf sum = zero;
+    for (int r = 0; r < 8; r++)
+        sum = vx_add(sum, vx_blend(EIGHT, zero, vx_abs(vx_sub(vx_loadu(luma_at(ya, x + ax, y + r + ay)), vx_loadu(luma_at(yb, x - bx, y + r - by))), &ABS_F)));
+    return vx_hsum(sum);
+}
+
+void bgra_fine_vx(const struct fg_field *mid, const struct fg_field *parent, const struct vt_plane *ya, const struct vt_plane *yb, const struct fg_field *fine, int stride, int i0, int i1)
+{
+    for (int i = i0; i < i1; i++) {
+        const int cx = i % fine->w, cy = i / fine->w;
+        const int x = cx * stride + stride / 2 - 4, y = cy * stride + stride / 2 - 4;
+        const int bx = (x + 4) / 8, by = (y + 4) / 8;
+        /* No motion first, with an edge: a still thing stays still. */
+        float best = fine_sad(ya, yb, x, y, 0, 0) - FINE_FAVOUR_ZERO;
+        int bestx = 0, besty = 0;
+        uint32_t seen[10];
+        int n = 0;
+        const struct fg_vec *pv = &parent->v[clampi(by / 2, 0, parent->h - 1) * parent->w + clampi(bx / 2, 0, parent->w - 1)];
+        for (int k = 0; k < 10; k++) {
+            /* The block's own and the eight around it, then the larger block's. */
+            struct fg_vec v;
+            if (k == 9) {
+                v.x = (int16_t)(pv->x * 2);
+                v.y = (int16_t)(pv->y * 2);
+            } else {
+                v = mid->v[clampi(by + (k % 3) - 1, 0, mid->h - 1) * mid->w + clampi(bx + (k / 3) - 1, 0, mid->w - 1)];
+            }
+            uint32_t w;
+            memcpy(&w, &v, sizeof w);
+            int dup = !w;
+            for (int q = 0; q < n; q++)
+                dup |= seen[q] == w;
+            if (dup)
+                continue;
+            seen[n++] = w;
+            const float s = fine_sad(ya, yb, x, y, v.x, v.y);
+            if (s < best) {
+                best = s;
+                bestx = v.x;
+                besty = v.y;
+            }
+        }
+        /* The steps a block's whole-pixel answer may have missed here: the eight around the best, one pixel of total motion each way. */
+        if (best > FINE_ENOUGH) {
+            const int cxv = bestx, cyv = besty;
+            for (int dy = -1; dy < 2; dy++)
+                for (int dx = -1; dx < 2; dx++) {
+                    if (!dx && !dy)
+                        continue;
+                    const float s = fine_sad(ya, yb, x, y, cxv + dx, cyv + dy);
+                    if (s < best) {
+                        best = s;
+                        bestx = cxv + dx;
+                        besty = cyv + dy;
+                    }
+                }
+        }
+        fine->v[i].x = (int16_t)bestx;
+        fine->v[i].y = (int16_t)besty;
+    }
+}
+
+void bgra_pick_vx(const struct fg_field *field, int stride, const struct fg_field *parent, const struct vt_plane *ya, const struct vt_plane *yb, const struct bgra *a, const struct bgra *b, const struct bgra *out, int r, int h, float bias, int phase, int t0, int t1)
 {
     /* Per vector, per row of the tile and of the window beyond it: the disagreement over the row's own columns. Integer-valued F32: 16,320 x 7 x 5 is far below 2^24, so the running sums below are exact, and the card and the lane model agree. */
     float cols[PICK_MAX][16 + 2 * PICK_RADIUS][16] VX_ALIGNED;
     const float bias_q VX_ALIGNED = bias;
     const vxf vbias = vx_bcast(&bias_q);
     const int tw = (out->w + 15) / 16;
+    /* The cells of the tile, then those of a ring half a tile wide: nearest first, for when more vectors are about than a tile weighs. */
+    const int inner = 16 / stride, ring = 8 / stride;
     for (int t = t0; t < t1; t++) {
         const int tx = t % tw, ty = t / tw, x = tx * 16, y0 = ty * 16;
         const int y1 = y0 + 16 < out->h ? y0 + 16 : out->h;
+        const int c0x = tx * inner, c0y = ty * inner;
         uint32_t cand[PICK_MAX];
         /* First, and so the winner of a tie: the tile's own block of the level above, whose larger block sees more: on a flat panel with a mark on it, it knows the panel moves. */
         const struct fg_vec *pv = &parent->v[clampi(ty, 0, parent->h - 1) * parent->w + clampi(tx, 0, parent->w - 1)];
         const struct fg_vec ps = {(int16_t)(pv->x * 2), (int16_t)(pv->y * 2)};
         memcpy(&cand[0], &ps, sizeof cand[0]);
         int n = 1;
-        for (int o = 0; o < 16; o++) {
-            uint32_t w;
-            memcpy(&w, &mid->v[clampi(2 * ty + PICK_ORDER[o][1], 0, mid->h - 1) * mid->w + clampi(2 * tx + PICK_ORDER[o][0], 0, mid->w - 1)], sizeof w);
-            int seen = 0;
-            for (int i = 0; i < n; i++)
-                seen |= cand[i] == w;
-            if (!seen && n < PICK_MAX)
-                cand[n++] = w;
-        }
-        /* Decoded once: a at x + ax, y + ay; b at x - bx, y - by. */
-        int ax[PICK_MAX], ay[PICK_MAX], bx[PICK_MAX], by[PICK_MAX];
+        for (int pass = 0; pass < 2; pass++)
+            for (int cy = c0y - ring; cy < c0y + inner + ring; cy++)
+                for (int cx = c0x - ring; cx < c0x + inner + ring; cx++) {
+                    const int in_tile = cx >= c0x && cx < c0x + inner && cy >= c0y && cy < c0y + inner;
+                    if (in_tile != (pass == 0))
+                        continue;
+                    uint32_t w;
+                    memcpy(&w, &field->v[clampi(cy, 0, field->h - 1) * field->w + clampi(cx, 0, field->w - 1)], sizeof w);
+                    int seen = 0;
+                    for (int i = 0; i < n; i++)
+                        seen |= cand[i] == w;
+                    if (!seen && n < PICK_MAX)
+                        cand[n++] = w;
+                }
+        struct pick_v c[PICK_MAX];
         if (n == 1) {
             /* Most of a picture. */
-            struct fg_vec v;
-            memcpy(&v, &cand[0], sizeof v);
-            const int sax = v.x >> 1, say = v.y >> 1, sbx = v.x - sax, sby = v.y - say;
+            pick_decode(&c[0], cand[0]);
+            pick_clip(&c[0], x, y0, y1, 0, out->w, out->h);
             for (int y = y0; y < y1; y++)
-                vxu_store_nr(bgra_row(out, y) + x, mean_bytes(vxu_loadu(row_at(a, x + sax, y + say)), vxu_loadu(row_at(b, x - sbx, y - sby))));
+                vxu_store_nr(bgra_row(out, y) + x, pick_px(a, b, out, x, y, &c[0], phase));
             continue;
         }
         /* No motion is always weighed. */
@@ -269,54 +414,70 @@ void bgra_pick_vx(const struct fg_field *mid, const struct fg_field *parent, con
             }
         }
         for (int i = 0; i < n; i++) {
-            struct fg_vec v;
-            memcpy(&v, &cand[i], sizeof v);
-            ax[i] = v.x >> 1;
-            ay[i] = v.y >> 1;
-            bx[i] = v.x - ax[i];
-            by[i] = v.y - ay[i];
+            pick_decode(&c[i], cand[i]);
+            pick_clip(&c[i], x, y0, y1, r, out->w, out->h);
         }
         const int rows = y1 - y0;
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < n; i++)
             for (int q = -r; q < rows + r; q++) {
                 const int yq = y0 + q;
-                const float *pa = luma_at(ya, x + ax[i], yq + ay[i]), *pb = luma_at(yb, x - bx[i], yq - by[i]);
-                const vxf cur = vx_abs(vx_sub(vx_loadu(pa), vx_loadu(pb)), &ABS_F);
+                const vxf cur = pick_d(ya, yb, x, yq, &c[i], out->w, out->h);
                 vxf sum = cur;
                 if (h > 0) {
-                    const vxf prev = vx_abs(vx_sub(vx_loadu(luma_at(ya, x - 16 + ax[i], yq + ay[i])), vx_loadu(luma_at(yb, x - 16 - bx[i], yq - by[i]))), &ABS_F);
-                    const vxf next = vx_abs(vx_sub(vx_loadu(luma_at(ya, x + 16 + ax[i], yq + ay[i])), vx_loadu(luma_at(yb, x + 16 - bx[i], yq - by[i]))), &ABS_F);
+                    const vxf prev = pick_d(ya, yb, x - 16, yq, &c[i], out->w, out->h), next = pick_d(ya, yb, x + 16, yq, &c[i], out->w, out->h);
                     sum = vx_add(sum, vx_add(vx_alignr(cur, prev, 15), vx_alignr(next, cur, 1)));
                     if (h > 1)
                         sum = vx_add(sum, vx_add(vx_alignr(cur, prev, 14), vx_alignr(next, cur, 2)));
                 }
                 vx_store(cols[i][q + r], sum);
             }
-        }
         vxf cost[PICK_MAX];
         for (int i = 0; i < n; i++) {
-            vxf c = vx_load(cols[i][0]);
+            vxf s = vx_load(cols[i][0]);
             for (int q = 1; q <= 2 * r; q++)
-                c = vx_add(c, vx_load(cols[i][q]));
-            cost[i] = c;
+                s = vx_add(s, vx_load(cols[i][q]));
+            cost[i] = s;
         }
         for (int s = 0; s < rows; s++) {
             const int y = y0 + s;
             /* The window of row s is cols[s .. s + 2 r]. */
-            vxu px = mean_bytes(vxu_loadu(row_at(a, x + ax[0], y + ay[0])), vxu_loadu(row_at(b, x - bx[0], y - by[0])));
+            vxu px = pick_px(a, b, out, x, y, &c[0], phase);
             vxf best = cost[0];
             for (int i = 1; i < n; i++) {
-                const vxf c = vx_add(cost[i], vbias);
-                const vxk k = vx_cmp(c, best, VX_CMP_LT);
+                const vxf ci = vx_add(cost[i], vbias);
+                const vxk k = vx_cmp(ci, best, VX_CMP_LT);
                 if (k) {
-                    px = vxu_blend(k, px, mean_bytes(vxu_loadu(row_at(a, x + ax[i], y + ay[i])), vxu_loadu(row_at(b, x - bx[i], y - by[i]))));
-                    best = vx_blend(k, best, c);
+                    px = vxu_blend(k, px, pick_px(a, b, out, x, y, &c[i], phase));
+                    best = vx_blend(k, best, ci);
                 }
             }
             vxu_store_nr(bgra_row(out, y) + x, px);
             if (s + 1 < rows)
                 for (int i = 0; i < n; i++)
                     cost[i] = vx_add(vx_sub(cost[i], vx_load(cols[i][s])), vx_load(cols[i][s + 2 * r + 1]));
+        }
+    }
+    img_fence();
+}
+
+/* ---- FSR is grey: its change in luma, onto the colours ---- */
+
+void bgra_fsr_merge_vx(const struct bgra *src, const struct vt_plane *y, const struct vt_plane *color, const struct bgra *dst, int y0, int y1)
+{
+    static const float K255 VX_ALIGNED = 255.0f, ONE_64 VX_ALIGNED = 1.0f / (float)VT_Q6, K0 VX_ALIGNED = 0.0f;
+    const vxf zero = vx_bcast(&K0), top = vx_bcast(&K255);
+    const vxu alpha = vxu_bcast(&ALPHA);
+    for (int r = y0; r < y1; r++) {
+        const uint32_t *s = bgra_row(src, r);
+        const float *ly = plane_row(y, r), *lc = plane_row(color, r);
+        uint32_t *d = bgra_row(dst, r);
+        VLOOP16(x, src->w) {
+            const vxu p = vxu_load(s + x);
+            const vxf delta = vx_sub(vx_mul_s(vx_load(lc + x), &K255), vx_mul_s(vx_load(ly + x), &ONE_64));
+            const vxf b = vx_round(vx_min(vx_max(vx_add(vxu_to_f(vxu_and_s(p, &M_FF)), delta), zero), top), VX_RND_NEAREST);
+            const vxf g = vx_round(vx_min(vx_max(vx_add(vxu_to_f(vxu_and_s(vxu_srl(p, 8), &M_FF)), delta), zero), top), VX_RND_NEAREST);
+            const vxf c = vx_round(vx_min(vx_max(vx_add(vxu_to_f(vxu_and_s(vxu_srl(p, 16), &M_FF)), delta), zero), top), VX_RND_NEAREST);
+            vxu_store_nr(d + x, vxu_or(vxu_or(vxu_from_f(b), vxu_sll(vxu_from_f(g), 8)), vxu_or(vxu_sll(vxu_from_f(c), 16), alpha)));
         }
     }
     img_fence();

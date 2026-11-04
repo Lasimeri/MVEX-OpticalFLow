@@ -19,6 +19,7 @@ static inline vxu vxu_loadu(const uint32_t *p)
 }
 /* A whole line with no read-for-ownership; a fence (img_fence) before another thread or the DMA engine reads it. */
 static inline void vxu_store_nr(uint32_t *p, vxu v) { __builtin_ia32_knc_vmovnrngoaps_mz(VX_ALL, (float *)p, (__v16sf)v, 0); }
+static inline void vxu_store(uint32_t *p, vxu v) { _mm512_store_epi32(p, (__m512i)v); }
 static inline vxu vxu_bcast(const uint32_t *p) { return (__v16si)__builtin_ia32_knc_vbroadcastss_zm(VX_U, VX_ALL, (const float *)p, 0); }
 static inline vxu vxu_and(vxu a, vxu b) { return __builtin_ia32_knc_vpandd_zzz(VX_UI, VX_ALL, a, b, 0); }
 static inline vxu vxu_or(vxu a, vxu b) { return __builtin_ia32_knc_vpord_zzz(VX_UI, VX_ALL, a, b, 0); }
@@ -46,6 +47,7 @@ static inline vxu vxu_zero(void) { vxu r; memset(r.l, 0, sizeof r.l); return r; 
 static inline vxu vxu_load(const uint32_t *p) { vxu r; memcpy(r.l, p, sizeof r.l); return r; }
 static inline vxu vxu_loadu(const uint32_t *p) { return vxu_load(p); }
 static inline void vxu_store_nr(uint32_t *p, vxu v) { memcpy(p, v.l, sizeof v.l); }
+static inline void vxu_store(uint32_t *p, vxu v) { memcpy(p, v.l, sizeof v.l); }
 static inline vxu vxu_bcast(const uint32_t *p) { vxu r; VX_LANE_LOOP r.l[i] = *p; return r; }
 static inline vxu vxu_and(vxu a, vxu b) { VX_LANE_LOOP a.l[i] &= b.l[i]; return a; }
 static inline vxu vxu_or(vxu a, vxu b) { VX_LANE_LOOP a.l[i] |= b.l[i]; return a; }

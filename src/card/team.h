@@ -19,6 +19,9 @@ void team_destroy(struct team *t);
 void team_run(struct team *t, team_fn fn, void *arg);
 int team_size(const struct team *t);
 
+/* How long a waiting thread gives away its issue slots between looks. A team that is idle while another works on the same cores should give away a lot. */
+void team_set_spin(struct team *t, unsigned cycles);
+
 /* Inside fn: waits until all n threads have arrived. Costs one contended line per arrival. */
 void team_barrier(struct team *t);
 

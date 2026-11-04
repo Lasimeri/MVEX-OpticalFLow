@@ -34,15 +34,16 @@ The port was never compared against AMD's shaders on a GPU. Its agreement with i
 | Copied unchanged | From `Intel-Phi-VisionTrack` | Role |
 |---|---|---|
 | `src/kern/framegen.{c,h}` | same path | The port. One change since the copy: `FG_ENOUGH` became `fg_job.enough`, its default the same |
+| `src/kern/fsr3.{c,h}` | same path | FSR 3.1.6 as MVEX. Changes since the copy: a path for the picture's own size, `fsr_set_step`, `fsr_set_alpha_floor`, `fsr_color` |
 | `src/kern/plane.h`, `img.h`, `img_vx.c`, `img_ref.c` | same path | F32 planes, padding, the pyramid's `img_reduce_vx` |
 | `src/common/vx.h`, `vt_util.h` | same path | Every MVEX operation with its host lane model; cycle counter, FNV |
-| `src/card/team.{c,h}`, `topo.{c,h}`, `arena.{c,h}`, `vt_dma.{c,h}` | same path | Spinning pinned team, topology, huge pages, the card's own DMA channel |
+| `src/card/team.{c,h}`, `topo.{c,h}`, `arena.{c,h}`, `vt_dma.{c,h}` | same path | Spinning pinned team (one change: `team_set_spin`), topology, huge pages, the card's own DMA channel |
 | `LICENSES/FidelityFX-MIT.txt`, `third_party/opticalflow/ffx_opticalflow.h` | same path | Licence, AMD's interface header |
 | `scripts/audit.sh`, `scripts/compdb.sh`, `config.mk` | same path | ISA audit, clangd check, tool paths. Adapted, not identical: names and paths |
 
 | Left out on purpose | Why |
 |---|---|
-| `fsr3.*`, `third_party/fsr3` | An upscaler, not interpolation |
+| `third_party/fsr3` | AMD's shaders the port of `fsr3.c` was read from: not needed to build, on disk only |
 | `track.c` | The tracker. The flow's order was taken out of it |
 | `vx_gather.S`, `depth`, `stereo`, `kalman`, `lk_*`, `detect`, `vecdraw` | Nothing here reaches them: a `-Werror` build with an audit found the closure |
 
@@ -50,7 +51,7 @@ The port was never compared against AMD's shaders on a GPU. Its agreement with i
 |---|---|
 | `src/common/vxu.h` | MVEX integer operations, in the form of `vx.h` |
 | `src/common/mf_proto.h` | Host and card contract, region part [1920, 1984) MiB |
-| `src/kern/bgra.{c,h}`, `flow.{c,h}` | Colour; the pipeline |
+| `src/kern/bgra.{c,h}`, `flow.{c,h}`, `deblock.{c,h}` | Colour and the picture; the chain; the deblocking filter, H.265's |
 | `src/card/mvexflowd.c` | The card's program |
 | `src/host/mvexflow.c`, `wlp.c`, `pwc.c`, `mf_link.c`, `mf_quit.c` | The host's program: Wayland overlay, PipeWire cast, link |
 | `src/host/mf_replay.c` | The gate |
