@@ -227,7 +227,7 @@ int main(int argc, char **argv)
     int gap = 2, count = 12, tpc = 2, cores = 60, ref = 0;
     int model_threads = 0, pick_r = -1, pick_h = -1, pick_bias = -1, enough = -1, fine = 0, phase = -1;
     int react = -1;
-    int stages = 0, tc = -1, beta = -1;
+    int stages = 0, tc = -1, beta = -1, amd = 0, smooth = 0;
     const char *dump = NULL;
     int dump_x = 400, dump_y = 200;
     for (int i = 1; i < argc; i++) {
@@ -263,6 +263,10 @@ int main(int argc, char **argv)
             fine = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--react") && i + 1 < argc)
             react = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--smooth"))
+            smooth = 1;
+        else if (!strcmp(argv[i], "--amd"))
+            amd = 1;
         else if (!strcmp(argv[i], "--stages") && i + 1 < argc)
             stages = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "--tc") && i + 1 < argc)
@@ -319,7 +323,7 @@ int main(int argc, char **argv)
         ref = 1;
     } else if (mf_link_open(&l))
         return 1;
-    const struct mf_config cfg = {.w = (uint32_t)W, .h = (uint32_t)H, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .pick_r = (uint32_t)(pick_r + 1), .pick_h = (uint32_t)(pick_h + 1), .pick_bias = (uint32_t)(pick_bias + 1), .enough = (uint32_t)(enough + 1), .fine = (uint32_t)fine, .phase = (uint32_t)(phase + 1), .stages = (uint32_t)stages, .tc = (uint32_t)(tc + 1), .beta = (uint32_t)(beta + 1), .alpha = (uint32_t)(react + 1)};
+    const struct mf_config cfg = {.w = (uint32_t)W, .h = (uint32_t)H, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .pick_r = (uint32_t)(pick_r + 1), .pick_h = (uint32_t)(pick_h + 1), .pick_bias = (uint32_t)(pick_bias + 1), .enough = (uint32_t)(enough + 1), .fine = (uint32_t)fine, .phase = (uint32_t)(phase + 1), .stages = (uint32_t)stages, .tc = (uint32_t)(tc + 1), .beta = (uint32_t)(beta + 1), .alpha = (uint32_t)(react + 1), .amd = (uint32_t)amd, .smooth = (uint32_t)smooth};
     if (!model_threads && mf_session_start(&l, &cfg, 30.0))
         return 1;
     if (!model_threads)
@@ -350,6 +354,8 @@ int main(int argc, char **argv)
             model->fg.enough = (float)enough;
         if (react >= 0)
             fsr_set_alpha_floor(model->fsr, (long double)react / 100.0L);
+        model->use_amd = amd;
+        model->use_smooth = smooth;
         if (stages) {
             model->use_fsr = ((stages - 1) & 1) != 0;
             model->use_deblock = ((stages - 1) & 2) != 0;

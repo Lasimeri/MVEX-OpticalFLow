@@ -31,6 +31,18 @@ static inline vxu vxu_mull(vxu a, vxu b) { return __builtin_ia32_knc_vpmulld_zzz
 static inline vxu vxu_and_s(vxu a, const uint32_t *s) { return __builtin_ia32_knc_vpandd_zzm(VX_UI, VX_ALL, a, s, VX_SSS_1TO16); }
 static inline vxu vxu_add_s(vxu a, const uint32_t *s) { return __builtin_ia32_knc_vpaddd_zzm(VX_UI, VX_ALL, a, s, VX_SSS_1TO16); }
 #define vxu_srl(v, n) (__builtin_ia32_knc_vpsrld_zzi(VX_UI, VX_ALL, (v), (n), 0))
+#define vxu_sra(v, n) (__builtin_ia32_knc_vpsrad_zzi(VX_UI, VX_ALL, (v), (n), 0))
+static inline vxu vxu_min_s(vxu a, vxu b) { return __builtin_ia32_knc_vpminsd_zzz(VX_UI, VX_ALL, a, b, 0); }
+static inline vxu vxu_max_s(vxu a, vxu b) { return __builtin_ia32_knc_vpmaxsd_zzz(VX_UI, VX_ALL, a, b, 0); }
+/* base[ix[lane]], base a pointer to 32-bit words: vx_gather.S. */
+static inline vxu vxu_gather(const uint32_t *base, vxu ix)
+{
+    int32_t in[16] VX_ALIGNED;
+    float o[16] VX_ALIGNED;
+    _mm512_store_epi32(in, (__m512i)ix);
+    vx_gather_knc((const float *)base, in, o);
+    return (__v16si)_mm512_load_epi32(o);
+}
 #define vxu_sll(v, n) (__builtin_ia32_knc_vpslld_zzi(VX_UI, VX_ALL, (v), (n), 0))
 /* Lanes of k from b, the rest from a. */
 static inline vxu vxu_blend(vxk k, vxu a, vxu b) { return (__v16si)__builtin_ia32_knc_vblendmps_zzz(k, (__v16sf)a, (__v16sf)b, 0); }
@@ -60,6 +72,11 @@ static inline vxu vxu_add_s(vxu a, const uint32_t *s) { VX_LANE_LOOP a.l[i] += *
 static inline vxu vxu_srl_model(vxu a, int n) { VX_LANE_LOOP a.l[i] >>= n; return a; }
 static inline vxu vxu_sll_model(vxu a, int n) { VX_LANE_LOOP a.l[i] <<= n; return a; }
 #define vxu_srl(v, n) vxu_srl_model((v), (n))
+static inline vxu vxu_sra_model(vxu a, int n) { VX_LANE_LOOP a.l[i] = (uint32_t)((int32_t)a.l[i] >> n); return a; }
+#define vxu_sra(v, n) vxu_sra_model((v), (n))
+static inline vxu vxu_min_s(vxu a, vxu b) { VX_LANE_LOOP a.l[i] = (int32_t)a.l[i] < (int32_t)b.l[i] ? a.l[i] : b.l[i]; return a; }
+static inline vxu vxu_max_s(vxu a, vxu b) { VX_LANE_LOOP a.l[i] = (int32_t)a.l[i] > (int32_t)b.l[i] ? a.l[i] : b.l[i]; return a; }
+static inline vxu vxu_gather(const uint32_t *base, vxu ix) { vxu r; VX_LANE_LOOP r.l[i] = base[(int32_t)ix.l[i]]; return r; }
 #define vxu_sll(v, n) vxu_sll_model((v), (n))
 static inline vxu vxu_blend(vxk k, vxu a, vxu b) { VX_LANE_LOOP if ((k >> i) & 1) a.l[i] = b.l[i]; return a; }
 static inline vxf vxu_to_f(vxu v) { vxf r; VX_LANE_LOOP r.l[i] = (float)(int32_t)v.l[i]; return r; }

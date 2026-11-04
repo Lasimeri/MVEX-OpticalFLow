@@ -221,6 +221,8 @@ static int serve(struct mf_ctl *ctl, struct vt_dma *dma, const struct topo *topo
         f.use_fsr = ((cfg.stages - 1) & 1u) != 0;
         f.use_deblock = ((cfg.stages - 1) & 2u) != 0;
     }
+    f.use_amd = (int)cfg.amd;
+    f.use_smooth = (int)cfg.smooth;
     if (cfg.alpha)
         fsr_set_alpha_floor(f.fsr, (long double)(cfg.alpha - 1) / 100.0L);
     if (cfg.tc)

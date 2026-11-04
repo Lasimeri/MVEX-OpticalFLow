@@ -39,8 +39,11 @@ out/host/tools/%.o: tools/%.c | $(PROTO_H)
 out/card/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(KNC_CLANG) $(CARD_CFLAGS) -c $< -o $@
+out/card/%.o: src/%.S
+	@mkdir -p $(dir $@)
+	$(KNC_CLANG) $(CARD_CFLAGS) -c $< -o $@
 
-KERN := kern/framegen kern/fsr3 kern/deblock kern/img_ref kern/img_vx kern/bgra kern/flow
+KERN := kern/framegen kern/fsr3 kern/deblock kern/amdfi kern/img_ref kern/img_vx kern/bgra kern/flow
 HOST_WIN := host/wlp host/pwc
 
 out/host/probe: out/host/tools/probe.o $(HOST_WIN:%=out/host/%.o) $(PROTO_O)
@@ -55,7 +58,7 @@ out/host/mf_replay: out/host/host/mf_replay.o out/host/host/mf_link.o $(KERN:%=o
 	$(HOST_CC) -o $@ $^ -lm -lpthread
 out/host/mf_quit: out/host/host/mf_quit.o out/host/host/mf_link.o
 	$(HOST_CC) -o $@ $^ -lm
-out/card/mvexflowd: out/card/card/mvexflowd.o out/card/card/vt_dma.o out/card/card/arena.o out/card/card/topo.o out/card/card/team.o $(KERN:%=out/card/%.o)
+out/card/mvexflowd: out/card/card/mvexflowd.o out/card/card/vt_dma.o out/card/card/arena.o out/card/card/topo.o out/card/card/team.o out/card/kern/vx_gather.o $(KERN:%=out/card/%.o)
 	$(KNC_LINK) -static -o $@ $^ -lpthread -lm
 	@scripts/audit.sh $@
 

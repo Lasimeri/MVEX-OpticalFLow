@@ -9,6 +9,7 @@
 #include "bgra.h"
 #include "framegen.h"
 #include "fsr3.h"
+#include "amdfi.h"
 
 enum flow_stage { FLOW_LAND, FLOW_PYR, FLOW_HIST, FLOW_SEARCH, FLOW_FILTER, FLOW_UP, FLOW_MID, FLOW_BLEND, FLOW_FSR, FLOW_DEBLOCK, FLOW_STAGES };
 /* FUSED, PLAIN: the port's field at half the picture's size, windows over 16 x 16 tiles, the two forms of its picture. PIXEL: the field at the picture's own size, a vector per pixel, whole-pixel samples. */
@@ -38,6 +39,10 @@ struct flow {
     void *run2_ctx;
     struct fsr *fsr;
     int use_fsr, use_deblock;
+    int use_amd;            /* the picture by AMD's smoothed field and bilinear per-pixel vectors, on the second team, in place of the pick */
+    int use_smooth;         /* AMD's 3 x 3 vector smoothing alone, on the second team, into the mid vectors and the pick */
+    struct fg_field smooth_in; /* what the finest filter made, kept while fil[0] holds the smoothed */
+    struct amdfi amd;
     float db_tc, db_beta;
     struct bgra pic;        /* the generated picture after FSR */
     const struct bgra *final; /* where the generated picture ended, after the last stage */

@@ -88,6 +88,22 @@ Frame-gen alone, half-size field: 37.9 to 47.8 ms.
 
 The team's stand-down: a real session of 993 s, 27,823 frames, one team back 2 times at 25.6 ms; both teams 66 ms. A frame after a pause reaches the glass without waiting for them.
 
+## AMD's smoothing
+
+AMD ships no pass named deblocking; what keeps its frames free of blocks is inside frame interpolation. Both forms run on the second team, 120 threads. Real footage, on the card, 20 frames, 3 rounds interleaved; card = lane model, 0 of 19,932,672 pixels differ on each, control caught 19 of 19:
+
+| Switch | dB | Sharp | Seams | Total ms | Max ms |
+|---|---|---|---|---|---|
+| none | 33.072 | .869 | 1.002 | 28.801 28.671 28.751 | 30.402 |
+| `--smooth`: `computeOpticalFlowVectorField` alone, the 3 x 3 smoothing, to whole pixels, into the mid vectors and the pick | 33.095 | .870 | .999 | 29.253 29.224 29.115 | 30.053 |
+| `--amd`: smoothing, `computeOpticalFlowFieldMvs`, bilinear per-pixel vectors, bilinear fetch, in place of the pick | 29.849 | .811 | .998 | 27.800 27.831 27.784 | 29.183 |
+
+Host lane model, 12 frames, dB, none / `--smooth` / `--amd`: pan 7 px 24.175 / 24.175 / 24.180; both 5, 3 px 21.786 / 21.786 / 21.785; scroll 33.208 / 32.768 / 25.530; window 26.183 / 26.134 / 21.346; pan 12 px 58.754 / 58.737 / 44.149; fast box 9.457 / 9.518 / 9.275.
+
+What `--smooth` costs, medians of the three rounds: mid 1.157 to 1.490 ms (+.333), the pick 4.108 to 4.226 ms (+.118), deblocking .471 to .513 ms (+.042), total 28.751 to 29.224 ms (+.473); totals spread .13 ms within a form.
+
+Why `--amd` falls is not split among its steps: smoothing, splat, bilinear vectors, bilinear fetch. Its smoothing, in `amdfi_field_vx`, is AMD's own, in sixteenths of a pixel with vectors of a pixel or less dropped, and is not the operation `--smooth` runs (the mid stage stays at 1.15 ms under `--amd`), so the loss of `--smooth` cannot be subtracted from it. Where the error lies, whole frame, 12 frames, none / `--smooth` / `--amd`, `mf_replay --dump P -1 0`, `logs/gate/20261104-121053-model-amd-edge.txt`: on pan, 100.0 % / 100.0 % / 100.0 % within 32 px of the picture's edge, so that fall is at the edge and says nothing of the interior; on scroll, 66.9 % / 71.5 % / 31.8 %, whole-frame 35.439 / 35.001 / 25.451 dB, so what `--amd` adds lies mostly away from the edge. Whether it lies at the scene's motion boundaries is not measured. AMD feeds this path game motion vectors, depth and inpainting as well; a screen cast has none of them, and no measurement here says how much they would give back.
+
 ## Design probes (`tools/probe.c`)
 
 | Question | Result |

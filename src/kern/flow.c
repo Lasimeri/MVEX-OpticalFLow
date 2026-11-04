@@ -9,7 +9,9 @@
 
 #define CHUNK 16 /* blocks or tiles taken at a time */
 
-enum { OP_LAND, OP_REDUCE, OP_HIST_A, OP_HIST_B, OP_SEARCH, OP_FILTER, OP_UP, OP_MID, OP_BLEND, OP_BLEND_PLAIN, OP_MERGE, OP_PICK, OP_FINE, OP_YM, OP_FSR, OP_FSR_MERGE, OP_DEBLOCK_V, OP_DEBLOCK_H };
+enum { OP_LAND, OP_REDUCE, OP_HIST_A, OP_HIST_B, OP_SEARCH, OP_FILTER, OP_UP, OP_MID, OP_BLEND, OP_BLEND_PLAIN, OP_MERGE, OP_PICK, OP_FINE, OP_YM, OP_FSR, OP_FSR_MERGE, OP_DEBLOCK_V, OP_DEBLOCK_H, OP_AMD_FIELD, OP_AMD_PICTURE, OP_SMOOTH };
+
+static void round2_of(struct flow *f, int op);
 
 static inline int row_of(int h, int tid, int n) { return (int)((int64_t)h * tid / n); }
 
@@ -38,7 +40,7 @@ size_t flow_bytes(int w, int h, int form)
     if (form == FLOW_PLAIN)
         n += 9u * plane_bytes(w, h);
     if (form == FLOW_PIXEL)
-        n += bgra_bytes(w, h) + 2u * plane_bytes(w, h) + fsr_bytes(w, h, w, h, 0, 0) + 4096u;
+        n += bgra_bytes(w, h) + 2u * plane_bytes(w, h) + fsr_bytes(w, h, w, h, 0, 0) + amdfi_bytes(w, h) + 4096u;
     return n + 4096u;
 }
 
@@ -92,6 +94,7 @@ int flow_init(struct flow *f, void *mem, int w, int h, int form, flow_run_fn run
     if (form == FLOW_PIXEL) {
         f->use_fsr = 1;
         f->use_deblock = 1;
+        amdfi_init(&f->amd, carve(&m, amdfi_bytes(w, h)), w, h);
         f->db_tc = 2.0f;
         f->db_beta = 12.0f;
         f->pic = bgra_at(carve(&m, bgra_bytes(w, h)), w, h);
@@ -196,6 +199,34 @@ static void flow_main(void *arg, int tid, int n)
             if (i >= count)
                 break;
             bgra_fine_vx(&f->fg.mid, &f->fg.fil[1], &f->pyr[!f->newest][0], &f->pyr[f->newest][0], &f->fine, f->fine_stride, i, i + 64 < count ? i + 64 : count);
+        }
+        break;
+    }
+    case OP_AMD_FIELD: {
+        const int count = f->fg.fil[0].w * f->fg.fil[0].h;
+        for (;;) {
+            const int i = __atomic_fetch_add(&f->next, 64, __ATOMIC_RELAXED);
+            if (i >= count)
+                break;
+            amdfi_field_vx(&f->amd, &f->fg.fil[0], &f->pyr[!f->newest][0], &f->pyr[f->newest][0], f->w, f->h, i, i + 64 < count ? i + 64 : count);
+        }
+        break;
+    }
+    case OP_AMD_PICTURE:
+        for (;;) {
+            const int i = __atomic_fetch_add(&f->next, CHUNK, __ATOMIC_RELAXED);
+            if (i >= f->tiles)
+                break;
+            amdfi_picture_vx(&f->amd, &f->frame[!f->newest], &f->frame[f->newest], &f->out, i, i + CHUNK < f->tiles ? i + CHUNK : f->tiles);
+        }
+        break;
+    case OP_SMOOTH: {
+        const int count = f->smooth_in.w * f->smooth_in.h;
+        for (;;) {
+            const int i = __atomic_fetch_add(&f->next, 64, __ATOMIC_RELAXED);
+            if (i >= count)
+                break;
+            amdfi_smooth_vx(&f->smooth_in, &f->fg.raw[0], i, i + 64 < count ? i + 64 : count);
         }
         break;
     }
@@ -314,6 +345,14 @@ int flow_make(struct flow *f)
             round_of(f, OP_UP, L);
         LAP(FLOW_UP);
     }
+    /* The finest level's filtered vectors through AMD's smoothing, on the second team: raw[0] is free by now, fil[0] and it trade places for the mid vectors. */
+    if (f->form == FLOW_PIXEL && f->use_smooth) {
+        f->smooth_in = j->fil[0];
+        round2_of(f, OP_SMOOTH);
+        const struct fg_field t = j->fil[0];
+        j->fil[0] = j->raw[0];
+        j->raw[0] = t;
+    }
     round_of(f, OP_MID, 0);
     if (f->form == FLOW_PIXEL && f->fine_stride < 8) {
         f->fine.w = (f->w + f->fine_stride - 1) / f->fine_stride;
@@ -328,7 +367,13 @@ int flow_make(struct flow *f)
     f->moved = moved;
     LAP(FLOW_MID);
     if (f->form == FLOW_PIXEL) {
-        round_of(f, OP_PICK, 0);
+        if (f->use_amd) {
+            amdfi_clear(&f->amd);
+            round2_of(f, OP_AMD_FIELD);
+            round2_of(f, OP_AMD_PICTURE);
+        } else {
+            round_of(f, OP_PICK, 0);
+        }
     } else if (f->form == FLOW_PLAIN) {
         for (int c = 0; c < 3; c++) {
             f->fgc[c] = *j;

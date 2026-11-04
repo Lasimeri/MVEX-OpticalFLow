@@ -37,6 +37,8 @@ struct mf_config {
     uint32_t stages;     /* 0 = both; else 1 + (1 FSR | 2 deblocking) */
     uint32_t tc, beta;   /* deblocking, each plus 1, 0 = default */
     uint32_t alpha;      /* FSR: the least of a pixel that is the new frame, percent plus 1, 0 = default */
+    uint32_t amd;        /* 1: the picture by AMD's smoothed field and bilinear vectors */
+    uint32_t smooth;     /* 1: AMD's 3 x 3 vector smoothing alone, into the pick */
 };
 
 /* Host to card: a frame is ready. */

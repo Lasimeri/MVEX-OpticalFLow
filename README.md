@@ -15,6 +15,7 @@ Frame-gen > FSR > deblocking
 | Frame-gen | Motion field at the picture's own size, 171 x 96 blocks of 8 x 8. Every pixel picks its own vector among those around it, by where the two frames agree over 5 x 5. At an odd motion, the mean of the two aligned pairs either side of the true middle | Search, filter, upscale: AMD's, through `framegen.c`. The rest: here | first, t0 t1 | 10.3 |
 | FSR | FSR 3.1.6's temporal pass at the picture's own size: no upscale, no sharpening (RCAS off), on luma, the change carried to the colours | AMD's, through the port in `fsr3.c`, with a floor on the new frame's weight | first | 15.1 |
 | Deblocking | H.265's normal luma filter, 8.7.2.5.7, on each colour, line by line, across the 8 x 8 grid, only where two blocks' vectors differ by a pixel | The standard's. **AMD ships no deblocking to port**: FidelityFX has none, AMF only an on/off for its hardware encoder | second, t2 t3 | 0.47 |
+| Vector smoothing, off by default, `--smooth` | AMD's `computeOpticalFlowVectorField` alone: the 3 x 3 weighted smoothing of the vector field, into the mid vectors and the pick. `--amd` takes the rest of AMD's optical-flow picture in place of the pick | AMD's, in `amdfi.c` | second | .33 |
 
 With frame in and picture out, 1.2 ms each, plus landing and pyramid: **28.6 ms of 33.45**. The chain is for frame generation's output. A real frame has been through no frame generation and has no seams; it goes to the glass as it came.
 
@@ -54,6 +55,8 @@ The stages can be chosen, each measured in `docs/measurements.md`:
 ```
 scripts/mvexflow.sh start --stages 2   # frame-gen and deblocking, no FSR: 13.6 ms a frame, closer to the truth, a refresh or two less latency
 scripts/mvexflow.sh start --stages 0   # frame-gen alone
+scripts/mvexflow.sh start --smooth     # AMD's 3 x 3 vector smoothing on the second team, into the pick: 29.2 ms, 33.095 dB
+scripts/mvexflow.sh start --amd        # AMD's whole optical-flow picture on the second team: 27.8 ms, 29.849 dB
 scripts/mvexflow.sh start --half       # the port's own form: field at half size, windows over 16 x 16 tiles
 scripts/mvexflow.sh start --phase 0    # whole-pixel samples: the sharpest (.964), half a pixel from the true middle at odd motion (29.281 dB)
 scripts/mvexflow.sh start --fine 4 --stages 2   # 342 x 192 vectors, no FSR: 22.6 ms
