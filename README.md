@@ -37,7 +37,7 @@ With frame in and picture out, 1.2 ms each, plus landing and pyramid: **28.6 ms 
 ║  │ first team, 120 threads, t0 t1: luma, pyramid, flow, mid, pick, FSR                    │ ║
 ║  │ second team, 120 threads, t2 t3: deblocking                                            │ ║
 ║  └────────────────────────────────────────────────────────────────────────────────────────┘ ║
-║  core 60: cpu 0, block pollers moved to cpus 241 and 242 for the session (tools/pollmove)    ║
+║  core 60: cpu 0, block pollers moved to cpus 241 and 242 for the session (tools/pollmove)   ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════╝
 ```
 

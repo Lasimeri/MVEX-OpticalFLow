@@ -67,7 +67,9 @@ Total ms, 59 x 2, 3 rounds: fused 6.49 to 6.51, plain 8.19 to 8.21; picture .94 
 
 ## On the monitor
 
-Test motion under the overlay (`tools/moving.c`), the whole chain, 13 s: cast 29.92/s, generated 29.92/s, glass 59.54/s, 771 of 774 pictures one refresh after the last, 3 two refreshes, 2 discards, 0 late, 0 skipped; card mean 29.04, max 34.70 ms; cast stamp to scanout 85 to 90 ms. In real use 71.5 ms.
+Test motion under the overlay (`tools/moving.c`), the whole chain, 13 s: cast 29.92/s, generated 29.92/s, glass 59.54/s, 771 of 774 pictures one refresh after the last, 3 two refreshes, 2 discards, 0 late, 0 skipped; card mean 29.04, max 34.70 ms; cast stamp to scanout 85 to 90 ms.
+
+The whole chain, real use, 129 s: identical 0.11/s, generated 29.77/s, glass 59.36/s, 25 discards, 1 skipped, 0 late; card mean 24.24, max 34.50 ms; 55 to 60 ms for 57 s, 70 to 75 ms for 68 s.
 
 Frame-gen and deblocking without FSR, real use, 216 s: glass 58.78/s, 6 discards, card mean 23.84 ms (a build with a needless copy since removed; 13.6 ms now), 45 to 65 ms.
 
