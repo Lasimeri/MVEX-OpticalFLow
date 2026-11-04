@@ -55,6 +55,8 @@ The stages can be chosen, each measured in `docs/measurements.md`:
 scripts/mvexflow.sh start --stages 2   # frame-gen and deblocking, no FSR: 13.6 ms a frame, closer to the truth, a refresh or two less latency
 scripts/mvexflow.sh start --stages 0   # frame-gen alone
 scripts/mvexflow.sh start --half       # the port's own form: field at half size, windows over 16 x 16 tiles
+scripts/mvexflow.sh start --phase 0    # whole-pixel samples: the sharpest (.964), half a pixel from the true middle at odd motion (29.281 dB)
+scripts/mvexflow.sh start --fine 4 --stages 2   # 342 x 192 vectors, no FSR: 22.6 ms
 ```
 
 `local.conf` (not tracked) says which monitor and which program opens the cast:

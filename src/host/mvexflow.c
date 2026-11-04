@@ -366,7 +366,7 @@ int main(int argc, char **argv)
 {
     static struct app a;
     uint32_t node = 0;
-    int tpc = 2, cores = 60, form = 2, seconds = 0, no_excl = 0, stages = 0, fine = 0;
+    int tpc = 2, cores = 60, form = 2, seconds = 0, no_excl = 0, stages = 0, fine = 0, phase = -1;
     const char *output = NULL;
     a.w_px = 1366;
     a.h_px = 768;
@@ -380,6 +380,8 @@ int main(int argc, char **argv)
             tpc = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cores") && i + 1 < argc)
             cores = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--phase") && i + 1 < argc)
+            phase = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stages") && i + 1 < argc)
             stages = atoi(argv[++i]) + 1;
         else if (!strcmp(argv[i], "--fine") && i + 1 < argc)
@@ -395,7 +397,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-excl"))
             no_excl = 1;
         else {
-            fprintf(stderr, "usage: mvexflow --node N --output NAME [--tpc T] [--cores C] [--half] [--plain] [--stages MASK: 1 FSR, 2 deblocking] [--fine S] [--pass] [--seconds S]\n");
+            fprintf(stderr, "usage: mvexflow --node N --output NAME [--tpc T] [--cores C] [--half] [--plain] [--stages MASK: 1 FSR, 2 deblocking] [--fine S] [--phase 0 whole pixels, 1 the true middle] [--pass] [--seconds S]\n");
             return 2;
         }
     }
@@ -410,7 +412,7 @@ int main(int argc, char **argv)
         return 1;
     a.stride_b = plane_stride(a.w_px) * 4;
     if (!a.pass_only) {
-        const struct mf_config cfg = {.w = (uint32_t)a.w_px, .h = (uint32_t)a.h_px, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .stages = (uint32_t)stages, .fine = (uint32_t)fine};
+        const struct mf_config cfg = {.w = (uint32_t)a.w_px, .h = (uint32_t)a.h_px, .cores = (uint32_t)cores, .tpc = (uint32_t)tpc, .form = (uint32_t)form, .stages = (uint32_t)stages, .fine = (uint32_t)fine, .phase = (uint32_t)(phase + 1)};
         if (mf_session_start(&a.l, &cfg, 15.0))
             return 1;
         printf("card: %u cores, %u threads, tsc %u MHz, form %s\n", a.l.ctl->card_cores, a.l.ctl->card_threads, a.l.ctl->card_mhz, form == 2 ? "pixel" : form == 1 ? "plain" : "fused");

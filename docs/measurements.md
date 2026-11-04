@@ -57,7 +57,18 @@ The picture's edge: 100.0 % of the error on the pan scene and 88.9 % on scroll l
 
 ## Vector grid
 
-Real footage, on the card, whole chain: cells of 8 pixels (171 x 96 vectors, the default) 33.284 dB, 46.8 ms; cells of 4 pixels (342 x 192) 33.251 dB, 57.7 ms. On the host, no FSR, cells of 8 / 4 / 2: pan 56.252 / 55.603 / 55.993; scroll 32.940 / 32.965 / 32.893; window 26.257 / 25.898 / 25.814; real 28.657 / 28.479 / 28.480 whole-pixel.
+Real footage, on the card, 20 frames, the current build, one run each:
+
+| Cell | FSR | dB | Sharp | Seams | Total ms | Max ms | Fits 33.45 |
+|---|---|---|---|---|---|---|---|
+| 8 px, 171 x 96 vectors (the default) | yes | 33.072 | .869 | 1.002 | 28.634 | 30.240 | yes |
+| 4 px, 342 x 192 | yes | 33.010 | .865 | 1.002 | 37.890 | 41.024 | **no** |
+| 8 px | no | **33.115** | .875 | 1.001 | **13.588** | 13.947 | yes |
+| 4 px | no | 33.048 | .871 | 1.002 | 22.642 | 24.361 | yes |
+| 2 px, 683 x 384 | no | 33.035 | .871 | 1.002 | 41.368 | 43.811 | **no** |
+| 8 px, whole-pixel picture | yes | 29.281 | .964 | 1.001 | 28.538 | 29.010 | yes |
+
+Denser vectors have measured no gain here: the pick already chooses per pixel among the blocks around it. `--fine 4` is there for the eye to judge.
 
 Tried and thrown out on these numbers: vectors projected forward to the middle instant (+.009 to +.065 dB without); credit in the pick for the texture a vector lines up (worse in every scene, sharpness to 2.383).
 
